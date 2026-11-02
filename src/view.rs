@@ -2371,6 +2371,17 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     }),
                     false,
                 ),
+                (
+                    8,
+                    "homeAssistant",
+                    "tv",
+                    Some(if state.preferences.home_assistant {
+                        language.t("stateOn")
+                    } else {
+                        language.t("stateOff")
+                    }),
+                    false,
+                ),
             ]
             .into_iter()
             .enumerate()

@@ -1,0 +1,228 @@
+"""Luma for LG webOS: camera overlays and notifications on TVs running the Luma launcher.
+
+Home Assistant calls the TV; the TV never needs Home Assistant credentials. For a camera entity,
+the service passes the TV Home Assistant's camera proxy URLs with the camera's short-lived access
+token, which the overlay app on the TV loads directly.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any
+
+import voluptuous as vol
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.const import CONF_HOST, CONF_PORT, Platform
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    HomeAssistantError,
+    ServiceValidationError,
+)
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.network import NoURLAvailableError, get_url
+from homeassistant.helpers.typing import ConfigType
+
+from .api import LumaAuthError, LumaClient, LumaError
+from .const import (
+    CONF_TOKEN,
+    DEFAULT_PORT,
+    DOMAIN,
+    POSITIONS,
+    SERVICE_DISMISS,
+    SERVICE_NOTIFY,
+    SERVICE_SHOW_CAMERA,
+    SIZES,
+)
+
+_LOGGER = logging.getLogger(__name__)
+PLATFORMS = [Platform.BUTTON, Platform.NOTIFY]
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+ATTR_CONFIG_ENTRY = "config_entry_id"
+ATTR_CAMERA = "camera"
+ATTR_STREAM_URL = "stream_url"
+ATTR_SNAPSHOT_URL = "snapshot_url"
+ATTR_MODE = "mode"
+ATTR_BASE_URL = "base_url"
+
+
+@dataclass
+class LumaData:
+    client: LumaClient
+
+
+type LumaConfigEntry = ConfigEntry[LumaData]
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: LumaConfigEntry) -> bool:
+    client = LumaClient(
+        async_get_clientsession(hass),
+        entry.data[CONF_HOST],
+        entry.data.get(CONF_PORT, DEFAULT_PORT),
+        entry.data[CONF_TOKEN],
+    )
+    # The TV may be off; only a definite "not paired" stops setup. Calls fail individually.
+    try:
+        await client.status()
+    except LumaAuthError as err:
+        raise ConfigEntryAuthFailed("Luma no longer knows this Home Assistant server") from err
+    except LumaError as err:
+        _LOGGER.debug("Luma at %s is not reachable yet: %s", client.host, err)
+    entry.runtime_data = LumaData(client)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: LumaConfigEntry) -> bool:
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Tell the TV to forget this server's token; best effort, the TV may be off."""
+    client = LumaClient(
+        async_get_clientsession(hass),
+        entry.data[CONF_HOST],
+        entry.data.get(CONF_PORT, DEFAULT_PORT),
+        entry.data.get(CONF_TOKEN),
+    )
+    try:
+        await client.unpair()
+    except LumaError as err:
+        _LOGGER.debug("Could not unpair from %s: %s", client.host, err)
+
+
+SHOW_CAMERA_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            vol.Optional(ATTR_CONFIG_ENTRY): vol.All(cv.ensure_list, [cv.string]),
+            vol.Optional(ATTR_CAMERA): cv.entity_id,
+            vol.Optional(ATTR_STREAM_URL): cv.url,
+            vol.Optional(ATTR_SNAPSHOT_URL): cv.url,
+            vol.Optional(ATTR_MODE, default="stream"): vol.In(["stream", "snapshot"]),
+            vol.Optional(ATTR_BASE_URL): cv.url,
+            vol.Optional("title"): vol.All(cv.string, vol.Length(max=80)),
+            vol.Optional("message"): vol.All(cv.string, vol.Length(max=200)),
+            vol.Optional("duration", default=30): vol.All(
+                vol.Coerce(float), vol.Range(min=5, max=600)
+            ),
+            vol.Optional("refresh", default=1): vol.All(
+                vol.Coerce(float), vol.Range(min=0.25, max=30)
+            ),
+            vol.Optional("position", default="top-right"): vol.In(POSITIONS),
+            vol.Optional("size", default="medium"): vol.In(SIZES),
+            vol.Optional("pause", default=False): cv.boolean,
+        }
+    ),
+    cv.has_at_least_one_key(ATTR_CAMERA, ATTR_STREAM_URL, ATTR_SNAPSHOT_URL),
+)
+DISMISS_SCHEMA = vol.Schema({vol.Optional(ATTR_CONFIG_ENTRY): vol.All(cv.ensure_list, [cv.string])})
+NOTIFY_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY): vol.All(cv.ensure_list, [cv.string]),
+        vol.Required("message"): vol.All(cv.string, vol.Length(min=1, max=300)),
+    }
+)
+
+
+def _targets(hass: HomeAssistant, call: ServiceCall) -> list[LumaConfigEntry]:
+    """The chosen TVs, or every loaded TV when none is chosen."""
+    wanted = call.data.get(ATTR_CONFIG_ENTRY)
+    entries = [
+        entry
+        for entry in hass.config_entries.async_entries(DOMAIN)
+        if entry.state is ConfigEntryState.LOADED and (wanted is None or entry.entry_id in wanted)
+    ]
+    if not entries:
+        raise ServiceValidationError("No loaded Luma TV matches this call")
+    return entries
+
+
+def camera_urls(hass: HomeAssistant, entity_id: str, base_url: str | None) -> tuple[str, str]:
+    """Home Assistant's MJPEG and snapshot proxy URLs for a camera, signed with its token.
+
+    Camera access tokens rotate every few minutes. An MJPEG stream keeps working once
+    connected; snapshot polling stops working after the token rotates, so keep snapshot
+    overlays to a few minutes.
+    """
+    state = hass.states.get(entity_id)
+    if state is None or not entity_id.startswith("camera."):
+        raise ServiceValidationError(f"{entity_id} is not a camera")
+    token = state.attributes.get("access_token")
+    if not token:
+        raise ServiceValidationError(f"{entity_id} is unavailable")
+    if base_url is None:
+        try:
+            # The TV is on the local network: prefer the internal address, allowing a bare IP.
+            base_url = get_url(hass, allow_external=False, allow_cloud=False, allow_ip=True)
+        except NoURLAvailableError as err:
+            raise ServiceValidationError(
+                "Set Home Assistant's local network URL, or pass base_url"
+            ) from err
+    base_url = base_url.rstrip("/")
+    return (
+        f"{base_url}/api/camera_proxy_stream/{entity_id}?token={token}",
+        f"{base_url}/api/camera_proxy/{entity_id}?token={token}",
+    )
+
+
+def overlay_payload(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
+    stream = data.get(ATTR_STREAM_URL)
+    snapshot = data.get(ATTR_SNAPSHOT_URL)
+    title = data.get("title")
+    if camera := data.get(ATTR_CAMERA):
+        camera_stream, camera_snapshot = camera_urls(hass, camera, data.get(ATTR_BASE_URL))
+        stream = stream or camera_stream
+        snapshot = snapshot or camera_snapshot
+        if title is None and (state := hass.states.get(camera)):
+            title = state.name
+    if data[ATTR_MODE] == "snapshot":
+        stream = None
+        if snapshot is None:
+            raise ServiceValidationError("Snapshot mode needs a camera or snapshot_url")
+    payload = {
+        "stream_url": stream,
+        "snapshot_url": snapshot,
+        "title": title,
+        "message": data.get("message"),
+        "duration": data["duration"],
+        "refresh": data["refresh"],
+        "position": data["position"],
+        "size": data["size"],
+        "pause": data["pause"],
+    }
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+async def _each(hass: HomeAssistant, entries: list[LumaConfigEntry], action) -> None:
+    failures = []
+    for entry in entries:
+        try:
+            await action(entry.runtime_data.client)
+        except LumaAuthError:
+            entry.async_start_reauth(hass)
+            failures.append(f"{entry.title}: pair again")
+        except LumaError as err:
+            failures.append(f"{entry.title}: {err}")
+    if failures:
+        raise HomeAssistantError("; ".join(failures))
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    async def show_camera(call: ServiceCall) -> None:
+        payload = overlay_payload(hass, dict(call.data))
+        await _each(hass, _targets(hass, call), lambda client: client.show(payload))
+
+    async def dismiss(call: ServiceCall) -> None:
+        await _each(hass, _targets(hass, call), lambda client: client.dismiss())
+
+    async def notify(call: ServiceCall) -> None:
+        message = call.data["message"]
+        await _each(hass, _targets(hass, call), lambda client: client.notify(message))
+
+    hass.services.async_register(DOMAIN, SERVICE_SHOW_CAMERA, show_camera, SHOW_CAMERA_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_DISMISS, dismiss, DISMISS_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_NOTIFY, notify, NOTIFY_SCHEMA)
+    return True

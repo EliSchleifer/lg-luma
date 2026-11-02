@@ -10,6 +10,7 @@ mod damage;
 mod diagnostics;
 mod egl_damage;
 mod font;
+mod home_assistant;
 mod i18n;
 #[path = "input-refresh.rs"]
 mod input_refresh;
@@ -704,6 +705,15 @@ fn run() -> Result<(), String> {
         options.preferences.is_none() && options.test_extra_apps == 0,
     );
     let webhook_service = webhook::Service::new();
+    // Pairings sit beside the preferences; a temporary --preferences profile keeps its own.
+    let mut home_assistant = home_assistant::Service::new(
+        home_assistant::Live { webos },
+        Some(preferences_path.with_file_name("home-assistant.json")),
+        home_assistant::PORT,
+    );
+    // Show the address to pair with only after the setting is turned on, not at every launch.
+    let mut home_assistant_enabled = state.preferences.home_assistant;
+    let mut announce_home_assistant = false;
     let update_service = update::Service::new(public_update_checks);
     effects(
         vec![Effect::Refresh],
@@ -1185,6 +1195,32 @@ fn run() -> Result<(), String> {
                     );
                 }
             }
+        }
+        if state.preferences.home_assistant != home_assistant_enabled {
+            home_assistant_enabled = state.preferences.home_assistant;
+            announce_home_assistant = home_assistant_enabled;
+        }
+        home_assistant.set_enabled(home_assistant_enabled);
+        while let Ok(event) = home_assistant.events.try_recv() {
+            let language = state.preferences.language;
+            let notice = match event {
+                home_assistant::Event::Listening(_) if !announce_home_assistant => continue,
+                home_assistant::Event::Listening(address) => {
+                    announce_home_assistant = false;
+                    language.format("homeAssistantListening", &[("address", &address)])
+                }
+                home_assistant::Event::PairingCode(code) => {
+                    language.format("homeAssistantCode", &[("code", &code)])
+                }
+                home_assistant::Event::Paired(name) => {
+                    language.format("homeAssistantPaired", &[("name", &name)])
+                }
+                home_assistant::Event::Failed(error) => {
+                    eprintln!("Luma Home Assistant: {error}");
+                    language.t("homeAssistantFailed").to_owned()
+                }
+            };
+            state.notify(notice);
         }
         while let Ok(webhook::Response::Done { title, result }) =
             webhook_service.receiver.try_recv()

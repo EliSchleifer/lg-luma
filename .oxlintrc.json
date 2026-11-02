@@ -5,7 +5,10 @@
     "correctness": "error"
   },
   "rules": {
-    "eslint/no-unused-vars": ["error", { "argsIgnorePattern": "^_" }]
+    "eslint/no-unused-vars": [
+      "error",
+      { "argsIgnorePattern": "^_", "caughtErrorsIgnorePattern": "^_" }
+    ]
   },
   "ignorePatterns": [".agents/skills/**", "node_modules/**", "dist/**", ".build/**", "target/**"]
 }

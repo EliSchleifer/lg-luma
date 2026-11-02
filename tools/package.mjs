@@ -142,19 +142,48 @@ await fs.cp(path.join(root, 'assets/licenses'), path.join(stage, 'licenses'), { 
 await fs.writeFile(path.join(stage, 'appinfo.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 const state = path.join(out, 'cli-state');
 await fs.mkdir(state, { recursive: true });
-const result = spawnSync(
-  process.execPath,
-  [
-    path.join(root, 'node_modules/@webos-tools/cli/bin/ares-package.js'),
-    '--no-minify',
-    '--outdir',
-    dist,
-    stage,
-  ],
-  { cwd: root, env: { ...process.env, APPDATA: state }, stdio: 'inherit', timeout: 120000 },
+function aresPackage(directory, outdir) {
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.join(root, 'node_modules/@webos-tools/cli/bin/ares-package.js'),
+      '--no-minify',
+      '--outdir',
+      outdir,
+      directory,
+    ],
+    { cwd: root, env: { ...process.env, APPDATA: state }, stdio: 'inherit', timeout: 120000 },
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
+// The Home Assistant overlay is a separate web app (one app per IPK). Luma's helper installs
+// the copy staged inside Luma's package when Home Assistant is turned on; .build/overlay-dist
+// keeps it for manual installs without adding another release asset.
+const overlayInfo = JSON.parse(await fs.readFile(path.join(root, 'overlay/appinfo.json'), 'utf8'));
+if (overlayInfo.id !== 'com.ecklf.luma.overlay' || overlayInfo.defaultWindowType !== 'overlay')
+  throw new Error('The overlay app must be com.ecklf.luma.overlay with an overlay window.');
+overlayInfo.version = manifest.version;
+const overlayStage = path.join(out, 'overlay');
+const overlayDist = path.join(out, 'overlay-dist');
+await fs.rm(overlayStage, { recursive: true, force: true });
+await fs.rm(overlayDist, { recursive: true, force: true });
+await fs.mkdir(overlayDist, { recursive: true });
+await fs.cp(path.join(root, 'overlay'), overlayStage, { recursive: true });
+await fs.writeFile(
+  path.join(overlayStage, 'appinfo.json'),
+  `${JSON.stringify(overlayInfo, null, 2)}\n`,
 );
-if (result.error) throw result.error;
-if (result.status !== 0) process.exit(result.status ?? 1);
+await fs.copyFile(path.join(out, 'assets/app-icon.png'), path.join(overlayStage, 'icon.png'));
+aresPackage(overlayStage, overlayDist);
+const overlayIpk = `${overlayInfo.id}_${overlayInfo.version}_all.ipk`;
+await fs.mkdir(path.join(stage, 'overlay'));
+await fs.copyFile(path.join(overlayDist, overlayIpk), path.join(stage, 'overlay/overlay.ipk'));
+await fs.writeFile(
+  path.join(stage, 'overlay/appinfo.json'),
+  `${JSON.stringify(overlayInfo, null, 2)}\n`,
+);
+aresPackage(stage, dist);
 const filename = `${manifest.id}_${manifest.version}_arm.ipk`;
 const packaged = normalizeAndVerifyPackage(await fs.readFile(path.join(dist, filename)), manifest);
 await fs.writeFile(path.join(dist, filename), packaged);

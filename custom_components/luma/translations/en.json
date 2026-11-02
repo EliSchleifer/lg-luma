@@ -1,0 +1,123 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Add a TV running Luma",
+        "description": "On the TV, open Luma → Settings → General and turn on Home Assistant. Luma shows the address to enter here.",
+        "data": { "host": "TV address", "port": "Port" }
+      },
+      "discovery_confirm": {
+        "title": "Luma found",
+        "description": "Pair Home Assistant with Luma on {name}?"
+      },
+      "pair": {
+        "title": "Enter the code on the TV",
+        "description": "Luma on {name} is showing a six-digit pairing code.",
+        "data": { "code": "Pairing code" }
+      },
+      "reauth_confirm": {
+        "title": "Pair again",
+        "description": "Luma on {name} no longer knows this Home Assistant server, for example because Home Assistant was turned off in Luma. Make sure it is on, then continue to get a new code."
+      }
+    },
+    "error": {
+      "cannot_connect": "Luma did not answer. Check that the TV is on, Luma is running and Home Assistant is turned on in Luma's settings.",
+      "invalid_code": "That code is not the one shown on the TV.",
+      "pairing_expired": "The code expired or too many wrong codes were entered. Submit again for a new code.",
+      "too_soon": "Wait a few seconds, then submit again for a new code."
+    },
+    "abort": {
+      "already_configured": "This TV is already set up.",
+      "cannot_connect": "Luma did not answer.",
+      "not_luma": "This TV is not running Luma with Home Assistant turned on.",
+      "pairing_refused": "Luma refused pairing. Turn Home Assistant off and on in Luma, then try again.",
+      "reauth_successful": "Paired again."
+    }
+  },
+  "entity": {
+    "button": { "dismiss_overlay": { "name": "Dismiss overlay" } },
+    "notify": { "toast": { "name": "Toast" } }
+  },
+  "selector": {
+    "mode": { "options": { "stream": "Live (MJPEG)", "snapshot": "Snapshots" } },
+    "position": {
+      "options": {
+        "top-right": "Top right",
+        "top-left": "Top left",
+        "bottom-right": "Bottom right",
+        "bottom-left": "Bottom left"
+      }
+    },
+    "size": { "options": { "small": "Small", "medium": "Medium", "large": "Large" } }
+  },
+  "services": {
+    "show_camera": {
+      "name": "Show camera",
+      "description": "Shows a camera in a corner of the TV over whatever is playing.",
+      "fields": {
+        "config_entry_id": {
+          "name": "TV",
+          "description": "The TV to show it on. Leave empty for every TV."
+        },
+        "camera": {
+          "name": "Camera",
+          "description": "A camera entity, such as a UniFi Protect doorbell."
+        },
+        "stream_url": {
+          "name": "Stream URL",
+          "description": "A motion-JPEG URL the TV can load directly, such as go2rtc's stream.mjpeg. Overrides the camera's stream."
+        },
+        "snapshot_url": {
+          "name": "Snapshot URL",
+          "description": "A JPEG URL the TV reloads every refresh interval. Overrides the camera's snapshot."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Live motion-JPEG (falls back to snapshots), or snapshots only."
+        },
+        "refresh": {
+          "name": "Snapshot interval",
+          "description": "Seconds between snapshots in snapshot mode or fallback."
+        },
+        "title": { "name": "Title", "description": "Defaults to the camera's name." },
+        "message": { "name": "Message", "description": "A second line under the title." },
+        "duration": {
+          "name": "Duration",
+          "description": "Seconds before the overlay closes. BACK on the remote closes it sooner."
+        },
+        "position": { "name": "Position", "description": "Corner of the screen." },
+        "size": { "name": "Size", "description": "Overlay size." },
+        "pause": {
+          "name": "Pause playback",
+          "description": "Pause what is playing while the overlay shows and resume afterwards. Live TV may keep playing."
+        },
+        "base_url": {
+          "name": "Home Assistant URL",
+          "description": "How the TV reaches Home Assistant for camera images. Defaults to Home Assistant's local network URL."
+        }
+      }
+    },
+    "dismiss": {
+      "name": "Dismiss overlay",
+      "description": "Closes the camera overlay and resumes paused playback.",
+      "fields": {
+        "config_entry_id": {
+          "name": "TV",
+          "description": "The TV to close it on. Leave empty for every TV."
+        }
+      }
+    },
+    "notify": {
+      "name": "Show toast",
+      "description": "Shows a short webOS notification over whatever is playing.",
+      "fields": {
+        "config_entry_id": {
+          "name": "TV",
+          "description": "The TV to show it on. Leave empty for every TV."
+        },
+        "message": { "name": "Message", "description": "Up to 300 characters." }
+      }
+    }
+  }
+}

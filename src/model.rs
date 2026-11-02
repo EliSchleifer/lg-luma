@@ -249,6 +249,8 @@ pub struct Preferences {
     #[serde(deserialize_with = "crate::wallpaper_cycle::deserialize")]
     pub wallpaper_cycle: bool,
     pub wallpaper_gradient: bool,
+    /// Accept camera overlays and notifications from paired Home Assistant servers.
+    pub home_assistant: bool,
     /// Unix seconds of the last automatic or chosen wallpaper change, for the timed modes.
     pub wallpaper_changed: u64,
 }
@@ -280,6 +282,7 @@ impl Default for Preferences {
             text_rendering: crate::text_rendering::TextRendering::default(),
             wallpaper_cycle: false,
             wallpaper_gradient: true,
+            home_assistant: false,
             wallpaper_changed: 0,
         }
     }

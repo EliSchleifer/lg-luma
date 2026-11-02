@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Luma Overlay</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <section id="card" class="card" hidden>
+      <div class="frame">
+        <img id="feed" alt="" />
+        <p id="status" class="status" hidden>Connecting to camera…</p>
+      </div>
+      <header>
+        <span class="live" aria-hidden="true"></span>
+        <div class="text">
+          <h1 id="title"></h1>
+          <p id="message" hidden></p>
+        </div>
+        <span class="hint">BACK to close</span>
+      </header>
+      <div class="progress"><i id="bar"></i></div>
+    </section>
+    <script src="logic.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -94,6 +94,8 @@ export function normalizeAndVerifyPackage(bytes, manifest) {
     'assets/font-license.txt',
     'assets/font-cjk-license.txt',
     'assets/version.txt',
+    'overlay/appinfo.json',
+    'overlay/overlay.ipk',
     ...[350, 400, 450, 500, 550, 600, 650, 800].flatMap((weight) => [
       `assets/font-${weight}.ttf`,
       `assets/font-display-${weight}.ttf`,
@@ -151,6 +153,10 @@ export function normalizeAndVerifyPackage(bytes, manifest) {
     .trim();
   if (version !== manifest.version)
     throw new Error('Packaged assets were generated for another version.');
+  const overlay = owned.find((file) => file.name.endsWith('/overlay/appinfo.json'));
+  const overlayInfo = overlay && JSON.parse(overlay.data.toString());
+  if (overlayInfo?.id !== 'com.ecklf.luma.overlay' || overlayInfo.version !== manifest.version)
+    throw new Error('The bundled Home Assistant overlay does not match this release.');
   const vectorFiles = owned.filter((file) => file.name.endsWith('.lvec'));
   for (const file of vectorFiles) {
     if (
