@@ -918,7 +918,7 @@ pinned Linux SDK, inspects/normalizes the actual IPK and generates checksums/fee
 **Rust checks, rendering, and native package** check remains as an aggregate that requires every
 preparation, smoke and package job to succeed. It uploads release/rendering artifacts on PRs,
 main-branch pushes and manual runs. `pnpm check` also validates synchronized release versions,
-and `pnpm test:release` covers version synchronization and the publish gate, including the real
+and `pnpm test:release` covers version synchronization, the R2 feed mirror and the real
 Changesets version command in an isolated fixture. Host CI cannot prove hardware compatibility,
 small-text quality or presentation frame rate.
 
@@ -961,44 +961,41 @@ changeset will not request an app version bump. For code or behavior changes, ad
 using semantic versioning: **patch** for backward-compatible fixes, **minor** for backward-compatible
 features, or **major** for breaking changes. The comment is informational, so documentation-only
 and maintenance PRs can still merge without a release changeset. It updates when a PR is opened,
-reopened, edited, marked ready or receives new commits, and skips the generated Version Packages
-PR. The workflow becomes active once it is merged into the PR's base branch. It uses
+reopened, edited, marked ready or receives new commits. The workflow becomes active once it is merged into the PR's base branch. It uses
 `pull_request_target` with a read-only status job and a separate comment-writing job, without
 installing dependencies or running code from the PR.
 
-After changesets merge into `main`, `.github/workflows/release-pr.yml` creates or updates the
-**Version Packages** PR on `changeset-release/main`. Changesets combines the pending notes using
-the highest requested bump. The custom `pnpm version:release` command updates `package.json`
-and `CHANGELOG.md`, then synchronizes `appinfo.json`, the root `Cargo.toml`, the `luma` entry in
-`Cargo.lock`, and the versioned IPK examples in `readme.md`. Dependency pins and supporting Rust
-crate versions are preserved. The package stays private and is never published to npm.
+Merging never publishes. Changesets wait in `.changeset/` until the next release.
 
-The generated PR receives the same CI build as ordinary PRs. Since PRs created with GitHub's
-built-in token do not trigger `pull_request` workflows, the release workflow explicitly dispatches
-`ci.yml` for the version branch. Enable **Settings → Actions → General → Allow GitHub Actions to
-create and approve pull requests** in the repository. No additional token or npm secret is needed.
+### Publishing a release
 
-Review and merge the version PR when ready to release. Only a main-branch push associated with
-that merged, same-repository PR and a numeric version increase can enter the publish job. It must
-also pass the existing checks, desktop smoke tests and native packaging build. Ordinary merges,
-unmerged PRs and manual CI runs do not publish. To retry a failed publication, rerun the original
-CI run for the merged version PR's main-branch commit.
+Run **Actions → Release → Run workflow** on `main` (`.github/workflows/release.yml`) and choose:
 
-The Actions graph now shows **Release eligibility → shared preparation → four parallel smoke
-suites + ARM package → aggregate validation → Publish release and Homebrew feed**. Eligibility
-runs on PRs and manual dispatches too, explicitly reporting validation-only rather than leaving
-a skipped job to interpret. The **Release rollout summary** runs even when earlier jobs fail,
-listing stage results, the run/artifact link, release eligibility and retry instructions.
-The Release PR workflow also links the generated Version Packages PR and explains the rollout
-in its summary and PR body. A version-branch dispatch validates only, while the main push after
-merging is the publication candidate. Shared assets and release artifacts are always from that
-same workflow run and commit, never from a previous PR build.
+- **bump**: `patch`, `minor` or `major` adds that bump (with the optional **notes** line as its
+  changelog entry) on top of any pending changesets; Changesets uses the highest requested bump.
+  `changesets` releases only the pending notes and fails if there are none.
 
-Publication retains the existing guards: an already-published version is skipped, a draft can be
-resumed, and a tag pointing at another commit requires a new app version. `pnpm version:check`
-checks synchronization without writing files. `pnpm version:sync` repairs metadata from the
-current `package.json` version without calculating a bump. `pnpm version:release` is reserved for
-the automated version PR.
+The workflow then:
+
+1. **Bump version.** `pnpm version:release` consumes the changesets, updates `package.json` and
+   `CHANGELOG.md`, and synchronizes `appinfo.json`, the root `Cargo.toml`, the `luma` entry in
+   `Cargo.lock` and the versioned IPK examples in `readme.md`. The result is committed as
+   `Release vX.Y.Z` on a temporary `release/vX.Y.Z` branch. An existing tag stops the run.
+2. **Validate.** Calls `ci.yml` on that commit: checks, unit tests, the four desktop smoke suites and
+   the verified ARM IPK and Homebrew feed.
+3. **Publish GitHub release.** Fast-forwards `main` to the release commit (refusing if `main` moved
+   meanwhile), creates the `vX.Y.Z` GitHub release from that run's artifacts and deletes the
+   temporary branch.
+4. **Publish to Cloudflare R2.** See [Release hosting](#release-hosting-cloudflare-r2).
+
+If bumping or validation fails, `main`, tags and the published feed are untouched: fix the problem
+and run Release again. If only the R2 step fails, re-run that job or run **Publish to Cloudflare R2**
+manually with the tag. `ci.yml` on its own (PRs, pushes to `main`, manual dispatch) only validates.
+No additional token is needed; the built-in token pushes the release commit.
+
+`pnpm version:check` checks synchronization without writing files. `pnpm version:sync` repairs
+metadata from the current `package.json` version without calculating a bump. `pnpm version:release`
+is reserved for the Release workflow.
 
 Homebrew Channel's details page reads `packages[].shortDescription` (or `fullDescriptionUrl`),
 not `manifest.appDescription`. The feed generator writes the root app metadata description into
@@ -1092,7 +1089,7 @@ releases/vX.Y.Z/*.ipk      immutable release assets, sha256sums, description, ic
 releases/vX.Y.Z/repo.json  that release's mirrored feed
 ```
 
-After the CI `release` job publishes a GitHub release, the `mirror` job calls
+After the Release workflow publishes a GitHub release, its `mirror` job calls
 `.github/workflows/publish-r2.yml`. It downloads the release assets, verifies `sha256sums`, rewrites
 the feed with `tools/mirror-feed.mjs` and uploads to R2 through its S3-compatible API (versioned assets
 first, root feed last). If a zone purge token is configured it also purges `/repo.json` from

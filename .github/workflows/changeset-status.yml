@@ -55,4 +55,4 @@ jobs:
 
             A PR without a release changeset does not request an app version bump. Documentation-only or maintenance changes that do not need a release can omit it.
 
-            This comment is informational. Releases are queued in the Version Packages PR and publish only after that PR is merged and CI passes.
+            This comment is informational. Merging does not publish: pending changesets ship the next time the **Release** workflow is run from the Actions tab.
