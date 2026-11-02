@@ -136,6 +136,58 @@ luna-send -i luna://com.webos.appInstallService/dev/install \
   '{"id":"com.ecklf.luma","ipkUrl":"/tmp/luma.ipk","subscribe":true}'
 ```
 
+## Remote SSH over Cloudflare
+
+Reach the TV's root SSH shell from anywhere at `tv.elischleifer.com` through the
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) that
+Home Assistant already runs.
+The tunnel opens no inbound ports on your router. Your SSH key still has to be accepted. Before
+you expose SSH, make sure key login works on the LAN and disable password login.
+
+Give the TV a fixed address first: add a DHCP reservation on your router, e.g. `192.168.1.50`.
+
+### Add the TV to your Home Assistant tunnel
+
+The Home Assistant **Cloudflared** add-on already runs a tunnel on the LAN, so add the TV to it as
+another hostname. Nothing is installed on the TV.
+
+- **Dashboard-managed tunnel** (the add-on was given a tunnel token): Zero Trust → **Networks →
+  Tunnels** → your tunnel → **Public Hostname → Add**: subdomain `tv`, domain `elischleifer.com`,
+  service type **SSH**, URL `192.168.1.50:22`.
+- **Add-on-managed tunnel** (hostnames are listed in the add-on configuration): add
+
+  ```yaml
+  additional_hosts:
+    - hostname: tv.elischleifer.com
+      service: ssh://192.168.1.50:22
+  ```
+
+  then restart the add-on. It creates the DNS record.
+
+### Lock it down with Cloudflare Access (recommended)
+
+Zero Trust → **Access → Applications → Add → Self-hosted**: domain `tv.elischleifer.com`, with a
+policy that allows only your email. Each new SSH session then needs a browser login before the
+SSH key is checked.
+
+### Connect from your Mac
+
+```sh
+brew install cloudflared
+```
+
+Add this to `~/.ssh/config`, using the key the TV already trusts:
+
+```text
+Host tv tv.elischleifer.com
+  HostName tv.elischleifer.com
+  User root
+  IdentityFile ~/.ssh/id_ed25519
+  ProxyCommand /opt/homebrew/bin/cloudflared access ssh --hostname %h
+```
+
+Then `ssh tv`. `scp -O file tv:/tmp/` also works, so the [SSH install](#ssh) steps work remotely.
+
 ## Replacing LG Home
 
 ### Takeover Method
