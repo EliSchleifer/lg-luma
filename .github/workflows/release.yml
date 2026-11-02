@@ -108,6 +108,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: write
+      statuses: write
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -131,6 +132,12 @@ jobs:
             echo "::error::main moved during the release ($BASE → $main). Run Release again."
             exit 1
           fi
+          # The validate job ran the full CI on this exact commit; record that under the check
+          # name the main-branch ruleset requires so the fast-forward is accepted.
+          gh api "repos/$GH_REPO/statuses/$SHA" -f state=success \
+            -f context='Rust checks, rendering, and native package' \
+            -f description="Validated by Release run $GITHUB_RUN_ID" \
+            -f target_url="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null
           # Not forced: GitHub rejects anything but a fast-forward.
           gh api -X PATCH "repos/$GH_REPO/git/refs/heads/main" -f sha="$SHA" -F force=false > /dev/null
           gh release create "$TAG" release/*.ipk release/sha256sums release/repo.json \

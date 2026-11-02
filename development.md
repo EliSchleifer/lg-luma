@@ -917,7 +917,7 @@ The ARM package job runs alongside these suites using the shared assets, cross-l
 pinned Linux SDK, inspects/normalizes the actual IPK and generates checksums/feed. The existing
 **Rust checks, rendering, and native package** check remains as an aggregate that requires every
 preparation, smoke and package job to succeed. It uploads release/rendering artifacts on PRs,
-main-branch pushes and manual runs. `pnpm check` also validates synchronized release versions,
+manual runs and Release runs. CI does not run again after a merge: PRs are the gate. `pnpm check` also validates synchronized release versions,
 and `pnpm test:release` covers version synchronization, the R2 feed mirror and the real
 Changesets version command in an isolated fixture. Host CI cannot prove hardware compatibility,
 small-text quality or presentation frame rate.
@@ -967,6 +967,24 @@ installing dependencies or running code from the PR.
 
 Merging never publishes. Changesets wait in `.changeset/` until the next release.
 
+### Merge gate
+
+CI runs on pull requests (and manual dispatch), not after merging. Protect `main` so nothing lands
+untested: **Settings → Rules → Rulesets → New ruleset → New branch ruleset**, enforcement
+**Active**, target **Include default branch**, then enable:
+
+- **Require status checks to pass** with **Require branches to be up to date before merging**,
+  adding the check **Rust checks, rendering, and native package**. "Up to date" means a PR is
+  re-tested against the current `main` before it can merge, so CI results are never stale.
+  (Merge queues do the same with less waiting but are only offered for organization-owned
+  repositories; `ci.yml` already runs on `merge_group`, so a queue can be enabled after a move.)
+- **Block force pushes** and **Restrict deletions**.
+
+Leave **Require a pull request before merging** off: the Release workflow fast-forwards `main` to
+its version commit directly. Before doing so it validates that exact commit with `ci.yml` and marks
+it with a successful **Rust checks, rendering, and native package** commit status, so the ruleset
+accepts it. Any other push to `main` without that passing check is rejected.
+
 ### Publishing a release
 
 Run **Actions → Release → Run workflow** on `main` (`.github/workflows/release.yml`) and choose:
@@ -990,7 +1008,7 @@ The workflow then:
 
 If bumping or validation fails, `main`, tags and the published feed are untouched: fix the problem
 and run Release again. If only the R2 step fails, re-run that job or run **Publish to Cloudflare R2**
-manually with the tag. `ci.yml` on its own (PRs, pushes to `main`, manual dispatch) only validates.
+manually with the tag. `ci.yml` on its own (PRs, manual dispatch) only validates.
 No additional token is needed; the built-in token pushes the release commit.
 
 `pnpm version:check` checks synchronization without writing files. `pnpm version:sync` repairs
