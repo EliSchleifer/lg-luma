@@ -12,7 +12,7 @@ use serde_json::json;
 use std::time::{Duration, Instant};
 
 #[test]
-fn signal_never_overrides_the_official_cable_state_or_auto_visibility() {
+fn signal_never_overrides_the_cable_state_and_auto_hides_sources_without_signal() {
     let cases = [
         (
             json!({"connected":true,"hdmiPlugIn":false,"hdmiSignalExist":true,"activate":true}),
@@ -71,7 +71,11 @@ fn signal_never_overrides_the_official_cable_state_or_auto_visibility() {
         let input = normalize_inputs(&json!([raw])).unwrap().remove(0);
         assert_eq!((input.connected, input.signal), (cable, signal));
         let mut preferences = Preferences::default();
-        assert_eq!(preferences.input_visible(&input), cable == Some(true));
+        // Auto gives a card only to a plugged-in source that is not reporting "no signal".
+        assert_eq!(
+            preferences.input_visible(&input),
+            cable == Some(true) && signal != Some(false)
+        );
         for language in Language::ALL {
             assert_eq!(input_status(&input, false, language), language.t(key));
         }
@@ -91,6 +95,11 @@ fn live_signal_keeps_card_geometry_names_apps_and_preferences() {
     let mut state = ready();
     let id = state.inventory.inputs[0].id.clone();
     state.preferences.set_input_name(&id, "Mac");
+    // Pinned On, the card stays through a signal change and only its badge updates.
+    state
+        .preferences
+        .input_modes
+        .insert(id.clone(), InputMode::On);
     state.focus = Target::App(id.clone());
     let previous = controls(&state);
     let preferences = serde_json::to_value(&state.preferences).unwrap();
@@ -377,17 +386,27 @@ fn inputs_lead_the_home_strip_and_follow_the_console_on_a_shared_port() {
         (face.title.as_str(), face.brand.as_str()),
         ("Xbox", "input-xbox")
     );
-    // The console sleeps: its card keeps the last identity, and saving is not repeated.
+    // The console switches off: its card leaves the strip and takes no slot, and the
+    // remembered identity is kept without saving again.
+    let favorite_x = |state: &crate::state::State| {
+        controls(state)
+            .iter()
+            .find(|c| c.target == Target::App("netflix".into()))
+            .map(|c| c.rect.x)
+            .unwrap()
+    };
+    let before = favorite_x(&state);
     inputs[0].device = None;
     inputs[0].signal = Some(false);
     assert!(!state.set_inputs(inputs.clone()));
-    assert_eq!(state.input_app(&id).unwrap().brand, "input-xbox");
-    assert!(
-        scene(&state)
-            .draw
-            .iter()
-            .any(|d| matches!(d, Draw::Text(t, ..) if t == "HDMI 1 · No signal"))
+    assert!(!state.apps().iter().any(|app| app.id == id));
+    assert!(favorite_x(&state) < before);
+    assert_eq!(
+        state.apps()[0].id,
+        "com.webos.app.hdmi2",
+        "the next card moves into the freed slot"
     );
+    assert_eq!(state.input_app(&id).unwrap().brand, "input-xbox");
     // The Switch wakes on the same port.
     inputs[0].device = Some(Console::NintendoSwitch);
     inputs[0].signal = Some(true);

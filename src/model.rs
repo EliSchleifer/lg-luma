@@ -412,11 +412,14 @@ impl Preferences {
         Some(self.custom_tiles.remove(index))
     }
 
+    /// Whether the input has a Home card. Auto needs a positive cable report and no
+    /// "no signal" report, so a console that is unplugged or switched off takes no slot.
+    /// Firmware without signal information falls back to the cable state.
     pub fn input_visible(&self, input: &Input) -> bool {
         match self.input_modes.get(&input.id).copied().unwrap_or_default() {
             InputMode::On => true,
             InputMode::Off => false,
-            InputMode::Auto => input.connected == Some(true),
+            InputMode::Auto => input.connected == Some(true) && input.signal != Some(false),
         }
     }
 
