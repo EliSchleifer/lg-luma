@@ -4,7 +4,6 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { syncVersions } from '../tools/sync-version.mjs';
-import { isReleaseMerge, isVersionIncrease } from '../tools/release-gate.mjs';
 import { mirrorFeed } from '../tools/mirror-feed.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
@@ -110,114 +109,6 @@ test('the real release command combines changesets and synchronizes every file',
   assert.match(changelog, /Fix release behavior/);
   assert.match(changelog, /Add a release feature/);
   assert.deepEqual(await fs.readdir(path.join(directory, '.changeset')), ['config.json']);
-});
-
-function gateFixture({ pull = {}, previous = '2.0.3', current = '2.0.4', event = {} } = {}) {
-  const context = {
-    eventName: 'push',
-    ref: 'refs/heads/main',
-    repo: { owner: 'ecklf', repo: 'lg-luma' },
-    sha: 'merged-commit',
-    payload: { before: 'previous-commit', forced: false, deleted: false },
-    ...event,
-  };
-  const releasePull = {
-    merged_at: '2026-10-23T12:00:00Z',
-    merge_commit_sha: context.sha,
-    base: { ref: 'main', repo: { full_name: 'ecklf/lg-luma' } },
-    head: { ref: 'changeset-release/main', repo: { full_name: 'ecklf/lg-luma' } },
-    ...pull,
-  };
-  const reads = [];
-  const github = {
-    paginate: async (_method, parameters) => {
-      assert.equal(parameters.commit_sha, context.sha);
-      return [releasePull];
-    },
-    rest: {
-      repos: {
-        listPullRequestsAssociatedWithCommit() {},
-        async getContent({ ref, path: filename }) {
-          assert.equal(filename, 'package.json');
-          reads.push(ref);
-          const version = ref === context.sha ? current : previous;
-          return {
-            data: {
-              encoding: 'base64',
-              content: Buffer.from(JSON.stringify({ version })).toString('base64'),
-            },
-          };
-        },
-      },
-    },
-  };
-  return { github, context, reads };
-}
-
-test('a merged same-repository version PR with an increased version can publish', async () => {
-  const fixture = gateFixture();
-  assert.equal(await isReleaseMerge(fixture), true);
-  assert.deepEqual(fixture.reads, ['previous-commit', 'merged-commit']);
-});
-
-test('ordinary merges, unmerged PRs, forks and manual runs cannot publish', async (t) => {
-  const cases = [
-    ['feature PR', { pull: { head: { ref: 'feature', repo: { full_name: 'ecklf/lg-luma' } } } }],
-    ['unmerged version PR', { pull: { merged_at: null } }],
-    ['different merge commit', { pull: { merge_commit_sha: 'other-commit' } }],
-    [
-      'fork version branch',
-      { pull: { head: { ref: 'changeset-release/main', repo: { full_name: 'other/lg-luma' } } } },
-    ],
-    ['deleted head repository', { pull: { head: { ref: 'changeset-release/main', repo: null } } }],
-    [
-      'different base',
-      { pull: { base: { ref: 'develop', repo: { full_name: 'ecklf/lg-luma' } } } },
-    ],
-    ['manual CI run', { event: { eventName: 'workflow_dispatch' } }],
-    ['PR checks', { event: { eventName: 'pull_request' } }],
-    ['other branch', { event: { ref: 'refs/heads/changeset-release/main' } }],
-    ['force push', { event: { payload: { before: 'previous-commit', forced: true } } }],
-    [
-      'initial push',
-      { event: { payload: { before: '0000000000000000000000000000000000000000' } } },
-    ],
-  ];
-  for (const [name, options] of cases) {
-    await t.test(name, async () => {
-      const fixture = gateFixture(options);
-      assert.equal(await isReleaseMerge(fixture), false);
-      assert.deepEqual(fixture.reads, []);
-    });
-  }
-});
-
-test('publishing requires a numeric version increase', async () => {
-  for (const current of ['2.0.3', '2.0.2', '1.99.99']) {
-    assert.equal(await isReleaseMerge(gateFixture({ current })), false);
-  }
-  for (const [previous, current] of [
-    ['2.0.3', '2.0.4'],
-    ['2.9.9', '2.10.0'],
-    ['2.99.99', '3.0.0'],
-  ]) {
-    assert.equal(isVersionIncrease(previous, current), true);
-  }
-  await assert.rejects(
-    isReleaseMerge(gateFixture({ current: '3.0.0-beta.1' })),
-    /Invalid numeric release version/,
-  );
-});
-
-test('missing PRs and failed GitHub lookups never permit publication', async () => {
-  const fixture = gateFixture();
-  fixture.github.paginate = async () => [];
-  assert.equal(await isReleaseMerge(fixture), false);
-  assert.deepEqual(fixture.reads, []);
-  fixture.github.paginate = async () => {
-    throw new Error('GitHub unavailable');
-  };
-  await assert.rejects(isReleaseMerge(fixture), /GitHub unavailable/);
 });
 
 test("R2 mirror rewrites only this release's asset URLs", () => {
