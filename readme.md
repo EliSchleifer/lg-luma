@@ -111,9 +111,14 @@ https://github.com/user-attachments/assets/3d3564d9-5942-4aef-a726-0323f5e86a07
 
 ### Homebrew Channel
 
+Add this repository in Homebrew Channel → Settings → Repositories:
+
 ```text
-https://github.com/ecklf/lg-luma/releases/latest/download/repo.json
+https://luma.elischleifer.com/repo.json
 ```
+
+This fork mirrors every published release to S3 behind CloudFront; see
+[CloudFront hosting](development.md#cloudfront-hosting).
 
 ### SSH
 

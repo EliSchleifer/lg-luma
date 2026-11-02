@@ -842,13 +842,13 @@ runtime font/translation services or telemetry are used. Weather attribution: Op
 ## Update availability
 
 On interactive desktop or TV startup a separate worker checks
-`https://github.com/ecklf/lg-luma/releases/latest/download/repo.json` once per process automatically.
+`https://luma.elischleifer.com/repo.json` once per process automatically.
 **Settings → System → Check again** retries on the same worker, with one request in flight at a time.
 It only reads the `com.ecklf.luma` package/manifest version and compares numeric major/minor/patch
 components with the compiled version. Equal, older, malformed or prerelease versions do not offer
 updates. HTTP is HTTPS-only with bounded redirects, a ten-second timeout, a 256 KiB reply limit and
 no proxy; failures are logged without interrupting launch and the status card offers retry.
-Scripted captures and simulated update previews do not contact GitHub. Interactive desktop checks
+Scripted captures and simulated update previews do not contact the release server. Interactive desktop checks
 use the same endpoint and worker as TV. The card shows the current version and only reports
 **No newer version found** after a successful check, never while unchecked or offline.
 A newer version shows an **Update available** notice and a **Settings → System** card with both
@@ -1076,3 +1076,48 @@ synchronization, copied recovery files, protected uninstall rejection, and compl
 new disposable test app through status 31. The previous build, preferences and integration policy
 were restored after testing. Manifest takeover on webOS 10/11 is covered by fixtures, but was not
 tested on hardware in this run; standby and cold boot were not tested.
+
+## CloudFront hosting
+
+Releases are mirrored to `https://luma.elischleifer.com` so TVs can use
+`https://luma.elischleifer.com/repo.json` as their Homebrew Channel repository and the in-app updater
+(`src/update.rs`) reads the same feed. Only IPKs under `https://luma.elischleifer.com/releases/` are
+accepted for self-update.
+
+Bucket layout:
+
+```text
+repo.json                  latest feed, asset URLs rewritten to CloudFront (60 s cache)
+releases/vX.Y.Z/*.ipk      immutable release assets, sha256sums, description, icon
+releases/vX.Y.Z/repo.json  that release's mirrored feed
+```
+
+After the CI `release` job publishes a GitHub release, the `cloudfront` job calls
+`.github/workflows/cloudfront.yml`. It downloads the release assets, verifies `sha256sums`, rewrites
+the feed with `tools/cloudfront-feed.mjs`, uploads to S3 (versioned assets first, root feed last) and
+invalidates `/repo.json`. Run **Publish to CloudFront** manually to backfill or re-mirror a tag; only
+the latest GitHub release may replace the root feed.
+
+### One-time AWS setup
+
+Deploy `infra/cloudfront.yml` in **us-east-1** (CloudFront requires its ACM certificate there):
+
+```sh
+aws cloudformation deploy --region us-east-1 --stack-name luma-cloudfront \
+  --template-file infra/cloudfront.yml --capabilities CAPABILITY_IAM \
+  --parameter-overrides HostedZoneId=<Route 53 zone ID for elischleifer.com>
+```
+
+- DNS in Route 53: pass `HostedZoneId`; the certificate validates and the A/AAAA alias records are
+  created automatically.
+- DNS elsewhere: omit `HostedZoneId`, add the ACM validation CNAME (ACM console) while the stack waits,
+  then CNAME `luma.elischleifer.com` to the `DistributionDomainName` output.
+- Already have a GitHub OIDC provider in the account: pass
+  `ExistingGitHubOidcProviderArn=<arn>`.
+
+Then set these repository **variables** (Settings → Secrets and variables → Actions → Variables) from
+the stack outputs: `AWS_ROLE_ARN` (`PublishRoleArn`), `LUMA_S3_BUCKET` (`BucketName`) and
+`LUMA_CLOUDFRONT_DISTRIBUTION_ID` (`DistributionId`). Optional: `AWS_REGION` (default `us-east-1`)
+and `LUMA_PUBLIC_URL` (default `https://luma.elischleifer.com`). Finally run **Publish to CloudFront**
+once with an empty tag to mirror the current release. The publish role trusts only workflow runs
+on `refs/heads/main` of `EliSchleifer/lg-luma`.

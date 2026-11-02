@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { syncVersions } from '../tools/sync-version.mjs';
 import { isReleaseMerge, isVersionIncrease } from '../tools/release-gate.mjs';
+import { mirrorFeed } from '../tools/cloudfront-feed.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const metadata = ['appinfo.json', 'Cargo.toml', 'Cargo.lock', 'readme.md'];
@@ -217,4 +218,38 @@ test('missing PRs and failed GitHub lookups never permit publication', async () 
     throw new Error('GitHub unavailable');
   };
   await assert.rejects(isReleaseMerge(fixture), /GitHub unavailable/);
+});
+
+test("CloudFront mirror rewrites only this release's asset URLs", () => {
+  const gh = 'https://github.com/EliSchleifer/lg-luma/releases/download/v2.16.2';
+  const feed = {
+    packages: [
+      {
+        id: 'com.ecklf.luma',
+        fullDescriptionUrl: `${gh}/description.html`,
+        iconUri: `${gh}/app-icon-large.png`,
+        manifest: {
+          id: 'com.ecklf.luma',
+          version: '2.16.2',
+          iconUri: `${gh}/app-icon-large.png`,
+          ipkUrl: `${gh}/com.ecklf.luma_2.16.2_arm.ipk`,
+          ipkHash: { sha256: 'a'.repeat(64) },
+          ipkSize: 10,
+        },
+      },
+    ],
+  };
+  const cf = 'https://luma.elischleifer.com/releases/v2.16.2';
+  const mirrored = mirrorFeed(feed, 'v2.16.2', 'https://luma.elischleifer.com/');
+  assert.equal(mirrored.packages[0].fullDescriptionUrl, `${cf}/description.html`);
+  assert.equal(mirrored.packages[0].iconUri, `${cf}/app-icon-large.png`);
+  assert.equal(mirrored.packages[0].manifest.iconUri, `${cf}/app-icon-large.png`);
+  assert.equal(mirrored.packages[0].manifest.ipkUrl, `${cf}/com.ecklf.luma_2.16.2_arm.ipk`);
+  assert.deepEqual(mirrored.packages[0].manifest.ipkHash, feed.packages[0].manifest.ipkHash);
+  assert.equal(feed.packages[0].manifest.ipkUrl, `${gh}/com.ecklf.luma_2.16.2_arm.ipk`);
+  assert.throws(() => mirrorFeed(feed, 'v2.16.3', 'https://luma.elischleifer.com'));
+  assert.throws(() => mirrorFeed(feed, 'v2.16.2', 'http://luma.elischleifer.com'));
+  const foreign = structuredClone(feed);
+  foreign.packages[0].manifest.ipkUrl = 'https://example.com/x_arm.ipk';
+  assert.throws(() => mirrorFeed(foreign, 'v2.16.2', 'https://luma.elischleifer.com'));
 });

@@ -1,0 +1,129 @@
+name: Publish to CloudFront
+run-name: "Publish ${{ inputs.tag || 'latest release' }} to CloudFront"
+
+# Mirrors a published GitHub release to S3 behind CloudFront so TVs can use
+# https://luma.elischleifer.com/repo.json as their Homebrew Channel repository.
+#
+# Layout in the bucket:
+#   repo.json                     latest feed (asset URLs rewritten to CloudFront)
+#   releases/<tag>/*              immutable release assets + that release's feed
+#
+# Required repository variables (Settings → Secrets and variables → Actions → Variables):
+#   AWS_ROLE_ARN                     IAM role assumed via GitHub OIDC (infra/cloudfront.yml output)
+#   LUMA_S3_BUCKET                   bucket name (infra/cloudfront.yml output)
+#   LUMA_CLOUDFRONT_DISTRIBUTION_ID  distribution ID (infra/cloudfront.yml output)
+# Optional:
+#   AWS_REGION                       bucket region (default us-east-1)
+#   LUMA_PUBLIC_URL                  public origin (default https://luma.elischleifer.com)
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to mirror (vX.Y.Z)
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to mirror (vX.Y.Z). Empty mirrors the latest release.
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudfront-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Mirror release to S3 and CloudFront
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PUBLIC_URL: ${{ vars.LUMA_PUBLIC_URL || 'https://luma.elischleifer.com' }}
+      BUCKET: ${{ vars.LUMA_S3_BUCKET }}
+      DISTRIBUTION: ${{ vars.LUMA_CLOUDFRONT_DISTRIBUTION_ID }}
+    steps:
+      - name: Require CloudFront configuration
+        env:
+          ROLE: ${{ vars.AWS_ROLE_ARN }}
+        run: |
+          missing=()
+          [ -n "$ROLE" ] || missing+=(AWS_ROLE_ARN)
+          [ -n "$BUCKET" ] || missing+=(LUMA_S3_BUCKET)
+          [ -n "$DISTRIBUTION" ] || missing+=(LUMA_CLOUDFRONT_DISTRIBUTION_ID)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing repository variables: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: tools
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Download release assets
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          latest="$(gh release view --json tagName --jq .tagName)"
+          TAG="${TAG:-$latest}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Invalid release tag: %s\n' "$TAG" >&2
+            exit 1
+          fi
+          mkdir -p "site/releases/$TAG"
+          gh release download "$TAG" --dir "site/releases/$TAG" \
+            --pattern '*.ipk' --pattern sha256sums --pattern repo.json \
+            --pattern description.html --pattern app-icon-large.png
+          (cd "site/releases/$TAG" && sha256sum --check --strict sha256sums)
+          node tools/cloudfront-feed.mjs "site/releases/$TAG/repo.json" "$TAG" "$PUBLIC_URL" \
+            > site/repo.json
+          cp site/repo.json "site/releases/$TAG/repo.json"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # Only the latest GitHub release may replace the root feed.
+          echo "latest=$([ "$TAG" = "$latest" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      - name: Upload to S3
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          LATEST: ${{ steps.release.outputs.latest }}
+        run: |
+          # Versioned assets never change once published.
+          aws s3 cp "site/releases/$TAG/" "s3://$BUCKET/releases/$TAG/" --recursive \
+            --cache-control 'public, max-age=31536000, immutable'
+          aws s3 cp "site/releases/$TAG/repo.json" "s3://$BUCKET/releases/$TAG/repo.json" \
+            --content-type application/json --cache-control 'public, max-age=300'
+          if [ "$LATEST" != true ]; then
+            printf '%s is not the latest release; leaving /repo.json unchanged.\n' "$TAG"
+            exit 0
+          fi
+          # The latest feed is uploaded last so it never references missing assets.
+          aws s3 cp site/repo.json "s3://$BUCKET/repo.json" \
+            --content-type application/json --cache-control 'public, max-age=60'
+      - name: Invalidate the latest feed
+        if: steps.release.outputs.latest == 'true'
+        run: |
+          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION" \
+            --paths /repo.json --query 'Invalidation.Id' --output text
+      - name: Summarize
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          {
+            echo "### Mirrored $TAG to CloudFront"
+            echo
+            echo "Homebrew Channel repository: $PUBLIC_URL/repo.json"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Luma release mirror: private S3 bucket behind CloudFront at a custom domain, plus a
+  GitHub Actions OIDC role that .github/workflows/cloudfront.yml assumes to publish.
+  Deploy in us-east-1 (CloudFront only accepts ACM certificates from that region).
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: luma.elischleifer.com
+  HostedZoneId:
+    Type: String
+    Default: ''
+    Description: >-
+      Route 53 hosted zone for the domain's parent (elischleifer.com). When set, the certificate
+      validates automatically and an alias record is created. Leave empty if DNS lives elsewhere:
+      add the validation CNAME shown in the ACM console while the stack waits, then point the
+      domain at the DistributionDomainName output with a CNAME.
+  GitHubRepository:
+    Type: String
+    Default: EliSchleifer/lg-luma
+    Description: owner/repo allowed to publish (case-sensitive, as GitHub reports it).
+  GitHubRef:
+    Type: String
+    Default: refs/heads/main
+    Description: Only workflow runs on this ref may assume the publish role.
+  ExistingGitHubOidcProviderArn:
+    Type: String
+    Default: ''
+    Description: >-
+      ARN of an existing token.actions.githubusercontent.com OIDC provider in this account.
+      Leave empty to create one (an account can only have one).
+
+Conditions:
+  UseRoute53: !Not [!Equals [!Ref HostedZoneId, '']]
+  CreateOidcProvider: !Equals [!Ref ExistingGitHubOidcProviderArn, '']
+
+Resources:
+  Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions: !If
+        - UseRoute53
+        - - DomainName: !Ref DomainName
+            HostedZoneId: !Ref HostedZoneId
+        - !Ref AWS::NoValue
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Luma release mirror
+        Aliases:
+          - !Ref DomainName
+        DefaultRootObject: repo.json
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          AcmCertificateArn: !Ref Certificate
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        Origins:
+          - Id: releases
+            DomainName: !GetAtt Bucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: releases
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # Managed-CachingOptimized: honours the Cache-Control set by the publish workflow.
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          # Managed-SimpleCORS: lets Homebrew Channel's web UI fetch the feed and description.
+          ResponseHeadersPolicyId: 60669652-455b-4ae9-85a4-c4c02393f86c
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${Bucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: UseRoute53
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      RecordSets:
+        - Name: !Ref DomainName
+          Type: A
+          AliasTarget:
+            DNSName: !GetAtt Distribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2 # CloudFront's fixed alias zone
+        - Name: !Ref DomainName
+          Type: AAAA
+          AliasTarget:
+            DNSName: !GetAtt Distribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2
+
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+
+  PublishRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Assumed by GitHub Actions to publish Luma releases to CloudFront.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingGitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubRepository}:ref:${GitHubRef}'
+      Policies:
+        - PolicyName: publish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:PutObject, s3:GetObject]
+                Resource: !Sub '${Bucket.Arn}/*'
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt Bucket.Arn
+              - Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+
+Outputs:
+  BucketName:
+    Description: Repository variable LUMA_S3_BUCKET
+    Value: !Ref Bucket
+  DistributionId:
+    Description: Repository variable LUMA_CLOUDFRONT_DISTRIBUTION_ID
+    Value: !Ref Distribution
+  PublishRoleArn:
+    Description: Repository variable AWS_ROLE_ARN
+    Value: !GetAtt PublishRole.Arn
+  DistributionDomainName:
+    Description: CNAME target for the custom domain when DNS is not in Route 53
+    Value: !GetAtt Distribution.DomainName
+  FeedUrl:
+    Description: Add this as a Homebrew Channel repository on the TV
+    Value: !Sub 'https://${DomainName}/repo.json'
