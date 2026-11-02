@@ -117,8 +117,8 @@ Add this repository in Homebrew Channel → Settings → Repositories:
 https://luma.elischleifer.com/repo.json
 ```
 
-This fork mirrors every published release to S3 behind CloudFront; see
-[CloudFront hosting](development.md#cloudfront-hosting).
+This fork mirrors every published release to Cloudflare R2; see
+[Release hosting](development.md#release-hosting-cloudflare-r2).
 
 ### SSH
 

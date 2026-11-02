@@ -1077,9 +1077,9 @@ new disposable test app through status 31. The previous build, preferences and i
 were restored after testing. Manifest takeover on webOS 10/11 is covered by fixtures, but was not
 tested on hardware in this run; standby and cold boot were not tested.
 
-## CloudFront hosting
+## Release hosting (Cloudflare R2)
 
-Releases are mirrored to `https://luma.elischleifer.com` so TVs can use
+Releases are mirrored to a Cloudflare R2 bucket served at `https://luma.elischleifer.com`, so TVs can use
 `https://luma.elischleifer.com/repo.json` as their Homebrew Channel repository and the in-app updater
 (`src/update.rs`) reads the same feed. Only IPKs under `https://luma.elischleifer.com/releases/` are
 accepted for self-update.
@@ -1087,37 +1087,43 @@ accepted for self-update.
 Bucket layout:
 
 ```text
-repo.json                  latest feed, asset URLs rewritten to CloudFront (60 s cache)
+repo.json                  latest feed, asset URLs rewritten to luma.elischleifer.com (60 s cache)
 releases/vX.Y.Z/*.ipk      immutable release assets, sha256sums, description, icon
 releases/vX.Y.Z/repo.json  that release's mirrored feed
 ```
 
-After the CI `release` job publishes a GitHub release, the `cloudfront` job calls
-`.github/workflows/cloudfront.yml`. It downloads the release assets, verifies `sha256sums`, rewrites
-the feed with `tools/cloudfront-feed.mjs`, uploads to S3 (versioned assets first, root feed last) and
-invalidates `/repo.json`. Run **Publish to CloudFront** manually to backfill or re-mirror a tag; only
-the latest GitHub release may replace the root feed.
+After the CI `release` job publishes a GitHub release, the `mirror` job calls
+`.github/workflows/publish-r2.yml`. It downloads the release assets, verifies `sha256sums`, rewrites
+the feed with `tools/mirror-feed.mjs` and uploads to R2 through its S3-compatible API (versioned assets
+first, root feed last). If a zone purge token is configured it also purges `/repo.json` from
+Cloudflare's cache; otherwise the 60-second `Cache-Control` bounds staleness. Run **Publish to
+Cloudflare R2** manually to backfill or re-mirror a tag; only the latest GitHub release may replace
+the root feed.
 
-### One-time AWS setup
+### One-time Cloudflare setup
 
-Deploy `infra/cloudfront.yml` in **us-east-1** (CloudFront requires its ACM certificate there):
+1. **R2 → Create bucket**, e.g. `luma` (location: Automatic).
+2. **Bucket → Settings → Custom Domains → Connect Domain** → `luma.elischleifer.com`. Cloudflare creates
+   the DNS record and certificate. Leave the `r2.dev` public URL disabled.
+3. **R2 → Manage API tokens → Create API token** (Account API token): permission **Object Read & Write**,
+   scoped to the `luma` bucket only. Copy the Access Key ID and Secret Access Key, and note the account
+   ID shown on the R2 overview page.
+4. Optional cache purge: **My Profile → API Tokens → Create Token** with **Zone → Cache Purge** for
+   `elischleifer.com`; note the zone ID from the domain's Overview page.
 
-```sh
-aws cloudformation deploy --region us-east-1 --stack-name luma-cloudfront \
-  --template-file infra/cloudfront.yml --capabilities CAPABILITY_IAM \
-  --parameter-overrides HostedZoneId=<Route 53 zone ID for elischleifer.com>
-```
+### GitHub configuration
 
-- DNS in Route 53: pass `HostedZoneId`; the certificate validates and the A/AAAA alias records are
-  created automatically.
-- DNS elsewhere: omit `HostedZoneId`, add the ACM validation CNAME (ACM console) while the stack waits,
-  then CNAME `luma.elischleifer.com` to the `DistributionDomainName` output.
-- Already have a GitHub OIDC provider in the account: pass
-  `ExistingGitHubOidcProviderArn=<arn>`.
+Settings → Secrets and variables → Actions:
 
-Then set these repository **variables** (Settings → Secrets and variables → Actions → Variables) from
-the stack outputs: `AWS_ROLE_ARN` (`PublishRoleArn`), `LUMA_S3_BUCKET` (`BucketName`) and
-`LUMA_CLOUDFRONT_DISTRIBUTION_ID` (`DistributionId`). Optional: `AWS_REGION` (default `us-east-1`)
-and `LUMA_PUBLIC_URL` (default `https://luma.elischleifer.com`). Finally run **Publish to CloudFront**
-once with an empty tag to mirror the current release. The publish role trusts only workflow runs
-on `refs/heads/main` of `EliSchleifer/lg-luma`.
+| Kind                | Name                     | Value                                   |
+| ------------------- | ------------------------ | --------------------------------------- |
+| Secret              | `R2_ACCESS_KEY_ID`       | R2 token Access Key ID                  |
+| Secret              | `R2_SECRET_ACCESS_KEY`   | R2 token Secret Access Key              |
+| Variable            | `CLOUDFLARE_ACCOUNT_ID`  | Cloudflare account ID                   |
+| Variable            | `R2_BUCKET`              | bucket name, e.g. `luma`                |
+| Secret (optional)   | `CLOUDFLARE_PURGE_TOKEN` | zone cache-purge token                  |
+| Variable (optional) | `CLOUDFLARE_ZONE_ID`     | `elischleifer.com` zone ID              |
+| Variable (optional) | `LUMA_PUBLIC_URL`        | default `https://luma.elischleifer.com` |
+
+Then run **Publish to Cloudflare R2** once with an empty tag to mirror the current release, and check
+`curl -sI https://luma.elischleifer.com/repo.json`.

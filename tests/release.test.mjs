@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { syncVersions } from '../tools/sync-version.mjs';
 import { isReleaseMerge, isVersionIncrease } from '../tools/release-gate.mjs';
-import { mirrorFeed } from '../tools/cloudfront-feed.mjs';
+import { mirrorFeed } from '../tools/mirror-feed.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const metadata = ['appinfo.json', 'Cargo.toml', 'Cargo.lock', 'readme.md'];
@@ -220,7 +220,7 @@ test('missing PRs and failed GitHub lookups never permit publication', async () 
   await assert.rejects(isReleaseMerge(fixture), /GitHub unavailable/);
 });
 
-test("CloudFront mirror rewrites only this release's asset URLs", () => {
+test("R2 mirror rewrites only this release's asset URLs", () => {
   const gh = 'https://github.com/EliSchleifer/lg-luma/releases/download/v2.16.2';
   const feed = {
     packages: [

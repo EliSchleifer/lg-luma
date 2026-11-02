@@ -271,7 +271,7 @@ use std::{
     time::Instant,
 };
 
-/// The Homebrew Channel feed this fork publishes to CloudFront (see `infra/cloudfront.yml`).
+/// The Homebrew Channel feed this fork mirrors to Cloudflare R2 (see `.github/workflows/publish-r2.yml`).
 pub const FEED: &str = "https://luma.elischleifer.com/repo.json";
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// Only IPKs from this project's own release assets are installed.

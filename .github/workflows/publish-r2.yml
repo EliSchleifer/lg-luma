@@ -1,0 +1,150 @@
+name: Publish to Cloudflare R2
+run-name: "Publish ${{ inputs.tag || 'latest release' }} to Cloudflare R2"
+
+# Mirrors a published GitHub release to a Cloudflare R2 bucket served at
+# https://luma.elischleifer.com, so TVs can use https://luma.elischleifer.com/repo.json as their
+# Homebrew Channel repository. Setup: development.md → "Release hosting (Cloudflare R2)".
+#
+# Layout in the bucket:
+#   repo.json                     latest feed (asset URLs rewritten to the public origin)
+#   releases/<tag>/*              immutable release assets + that release's feed
+#
+# Secrets:   R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, CLOUDFLARE_PURGE_TOKEN (optional)
+# Variables: CLOUDFLARE_ACCOUNT_ID, R2_BUCKET, CLOUDFLARE_ZONE_ID (optional),
+#            LUMA_PUBLIC_URL (optional, default https://luma.elischleifer.com)
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to mirror (vX.Y.Z)
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to mirror (vX.Y.Z). Empty mirrors the latest release.
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r2-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Mirror release to Cloudflare R2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      PUBLIC_URL: ${{ vars.LUMA_PUBLIC_URL || 'https://luma.elischleifer.com' }}
+      BUCKET: ${{ vars.R2_BUCKET }}
+      ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      # R2's S3-compatible API.
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+    steps:
+      - name: Require R2 configuration
+        run: |
+          missing=()
+          [ -n "$ACCOUNT_ID" ] || missing+=('variable CLOUDFLARE_ACCOUNT_ID')
+          [ -n "$BUCKET" ] || missing+=('variable R2_BUCKET')
+          [ -n "$AWS_ACCESS_KEY_ID" ] || missing+=('secret R2_ACCESS_KEY_ID')
+          [ -n "$AWS_SECRET_ACCESS_KEY" ] || missing+=('secret R2_SECRET_ACCESS_KEY')
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing repository configuration: %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+          echo "ENDPOINT=https://$ACCOUNT_ID.r2.cloudflarestorage.com" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: tools
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Download release assets
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          latest="$(gh release view --json tagName --jq .tagName)"
+          TAG="${TAG:-$latest}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Invalid release tag: %s\n' "$TAG" >&2
+            exit 1
+          fi
+          mkdir -p "site/releases/$TAG"
+          gh release download "$TAG" --dir "site/releases/$TAG" \
+            --pattern '*.ipk' --pattern sha256sums --pattern repo.json \
+            --pattern description.html --pattern app-icon-large.png
+          (cd "site/releases/$TAG" && sha256sum --check --strict sha256sums)
+          node tools/mirror-feed.mjs "site/releases/$TAG/repo.json" "$TAG" "$PUBLIC_URL" \
+            > site/repo.json
+          cp site/repo.json "site/releases/$TAG/repo.json"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # Only the latest GitHub release may replace the root feed.
+          echo "latest=$([ "$TAG" = "$latest" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Upload to R2
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          LATEST: ${{ steps.release.outputs.latest }}
+        run: |
+          s3() { aws s3 --endpoint-url "$ENDPOINT" "$@"; }
+          dir="site/releases/$TAG"
+          # Versioned assets never change once published.
+          s3 cp "$dir/" "s3://$BUCKET/releases/$TAG/" --recursive --exclude repo.json \
+            --cache-control 'public, max-age=31536000, immutable'
+          s3 cp "$dir/repo.json" "s3://$BUCKET/releases/$TAG/repo.json" \
+            --content-type application/json --cache-control 'public, max-age=300'
+          if [ "$LATEST" != true ]; then
+            printf '%s is not the latest release; leaving /repo.json unchanged.\n' "$TAG"
+            exit 0
+          fi
+          # The latest feed is uploaded last so it never references missing assets.
+          s3 cp site/repo.json "s3://$BUCKET/repo.json" \
+            --content-type application/json --cache-control 'public, max-age=60'
+      - name: Purge the latest feed from Cloudflare's cache
+        if: steps.release.outputs.latest == 'true'
+        env:
+          ZONE_ID: ${{ vars.CLOUDFLARE_ZONE_ID }}
+          PURGE_TOKEN: ${{ secrets.CLOUDFLARE_PURGE_TOKEN }}
+        run: |
+          if [ -z "$ZONE_ID" ] || [ -z "$PURGE_TOKEN" ]; then
+            echo 'No purge token configured; /repo.json refreshes within its 60 s cache lifetime.'
+            exit 0
+          fi
+          curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/purge_cache" \
+            -H "Authorization: Bearer $PURGE_TOKEN" -H 'Content-Type: application/json' \
+            --data "{\"files\":[\"$PUBLIC_URL/repo.json\",\"$PUBLIC_URL/\"]}" > /dev/null
+      - name: Verify the public feed
+        if: steps.release.outputs.latest == 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          # Best effort: without a purge, an older feed may be served for up to a minute.
+          for attempt in 1 2 3 4 5 6; do
+            version="$(curl -fsS "$PUBLIC_URL/repo.json?v=$GITHUB_RUN_ID" \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).packages[0].manifest.version))' || true)"
+            [ "v$version" = "$TAG" ] && { echo "Serving $TAG"; exit 0; }
+            sleep 15
+          done
+          echo "::warning::$PUBLIC_URL/repo.json does not report $TAG yet (got '${version:-nothing}')."
+      - name: Summarize
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          {
+            echo "### Mirrored $TAG to Cloudflare R2"
+            echo
+            echo "Homebrew Channel repository: $PUBLIC_URL/repo.json"
+          } >> "$GITHUB_STEP_SUMMARY"

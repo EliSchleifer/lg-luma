@@ -1,7 +1,7 @@
 // Rewrites a GitHub release's Homebrew Channel feed so every asset URL points at the
-// CloudFront mirror: <base>/releases/<tag>/<file>. The IPK bytes, hash and size are unchanged.
+// public mirror (Cloudflare R2 at luma.elischleifer.com): <base>/releases/<tag>/<file>. The IPK bytes, hash and size are unchanged.
 //
-//   node tools/cloudfront-feed.mjs <repo.json> <tag> <base-url>  → prints the mirrored feed
+//   node tools/mirror-feed.mjs <repo.json> <tag> <base-url>  → prints the mirrored feed
 import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
@@ -36,7 +36,7 @@ export function mirrorFeed(feed, tag, base) {
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const [file, tag, base] = process.argv.slice(2);
   if (!file || !tag || !base) {
-    console.error('Usage: node tools/cloudfront-feed.mjs <repo.json> <tag> <base-url>');
+    console.error('Usage: node tools/mirror-feed.mjs <repo.json> <tag> <base-url>');
     process.exit(2);
   }
   const feed = JSON.parse(await fs.readFile(file, 'utf8'));
