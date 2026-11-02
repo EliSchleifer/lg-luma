@@ -91,14 +91,14 @@ fn live_signal_keeps_card_geometry_names_apps_and_preferences() {
     let mut state = ready();
     let id = state.inventory.inputs[0].id.clone();
     state.preferences.set_input_name(&id, "Mac");
-    state.focus = Target::Input(id.clone());
+    state.focus = Target::App(id.clone());
     let previous = controls(&state);
     let preferences = serde_json::to_value(&state.preferences).unwrap();
     let apps = serde_json::to_value(&state.inventory.apps).unwrap();
     let mut inputs = state.inventory.inputs.clone();
     inputs[0].signal = Some(false);
     state.set_inputs(inputs.clone());
-    assert_eq!(state.focus, Target::Input(id));
+    assert_eq!(state.focus, Target::App(id));
     let next = controls(&state);
     for before in &previous {
         let after = next.iter().find(|c| c.target == before.target).unwrap();
@@ -138,16 +138,16 @@ fn live_signal_keeps_card_geometry_names_apps_and_preferences() {
 fn disconnect_reconciles_home_focus_and_preserves_visibility_overrides() {
     let mut state = ready();
     let id = state.inventory.inputs[0].id.clone();
-    state.focus = Target::Input(id.clone());
+    state.focus = Target::App(id.clone());
     let mut inputs = state.inventory.inputs.clone();
     inputs[0].connected = Some(false);
     inputs[0].signal = Some(true);
     state.set_inputs(inputs.clone());
-    assert_ne!(state.focus, Target::Input(id.clone()));
+    assert_ne!(state.focus, Target::App(id.clone()));
     assert!(
         !controls(&state)
             .iter()
-            .any(|c| c.target == Target::Input(id.clone()))
+            .any(|c| c.target == Target::App(id.clone()))
     );
     state
         .preferences
@@ -156,7 +156,7 @@ fn disconnect_reconciles_home_focus_and_preserves_visibility_overrides() {
     assert!(
         controls(&state)
             .iter()
-            .any(|c| c.target == Target::Input(id.clone()))
+            .any(|c| c.target == Target::App(id.clone()))
     );
     state
         .preferences
@@ -167,7 +167,7 @@ fn disconnect_reconciles_home_focus_and_preserves_visibility_overrides() {
     assert!(
         !controls(&state)
             .iter()
-            .any(|c| c.target == Target::Input(id.clone()))
+            .any(|c| c.target == Target::App(id.clone()))
     );
 }
 
@@ -221,7 +221,7 @@ fn polling_only_runs_on_visible_focused_tv_input_screens_outside_interactions() 
     state.moving = Some(state.inventory.apps[0].id.clone());
     assert!(!active(&state));
     state.moving = None;
-    state.pressed = Some(Target::Input(state.inventory.inputs[0].id.clone()));
+    state.pressed = Some(Target::App(state.inventory.inputs[0].id.clone()));
     assert!(!active(&state));
     state.pressed = None;
     state.open(1);
@@ -281,7 +281,7 @@ fn snapshots_wait_for_release_and_yield_to_a_newer_full_inventory() {
 fn a_disconnect_snapshot_cannot_move_the_pressed_card_before_release() {
     let mut state = ready();
     let id = state.inventory.inputs[0].id.clone();
-    state.pressed = Some(Target::Input(id.clone()));
+    state.pressed = Some(Target::App(id.clone()));
     let mut inputs = state.inventory.inputs.clone();
     inputs[0].connected = Some(false);
     let mut refresh = Refresh::default();
@@ -294,7 +294,7 @@ fn a_disconnect_snapshot_cannot_move_the_pressed_card_before_release() {
     assert!(
         controls(&state)
             .iter()
-            .any(|c| c.target == Target::Input(id.clone()))
+            .any(|c| c.target == Target::App(id.clone()))
     );
     state.pressed = None;
     state.set_inputs(
@@ -305,7 +305,7 @@ fn a_disconnect_snapshot_cannot_move_the_pressed_card_before_release() {
     assert!(
         !controls(&state)
             .iter()
-            .any(|c| c.target == Target::Input(id.clone()))
+            .any(|c| c.target == Target::App(id.clone()))
     );
 }
 
@@ -325,4 +325,100 @@ fn hidden_screens_cancel_scheduled_reads_without_duplicating_in_flight_requests(
         .unwrap();
     assert!(!refresh.due(now + Duration::from_secs(42), true));
     assert!(refresh.due(now + Duration::from_secs(43), true));
+}
+
+#[test]
+fn consoles_are_recognized_from_spd_and_cec_reports() {
+    use crate::model::Console;
+    let cases = [
+        (
+            json!({"spdVendorName":"MSFT","spdProductDescription":"Xbox One"}),
+            Some(Console::Xbox),
+        ),
+        (json!({"label":"Xbox One"}), Some(Console::Xbox)),
+        (
+            json!({"spdVendorName":"Nintendo","spdProductDescription":"Switch"}),
+            Some(Console::NintendoSwitch),
+        ),
+        (
+            json!({"label":"HDMI1","cecDeviceName":"NintendoSwitch"}),
+            Some(Console::NintendoSwitch),
+        ),
+        (json!({"label":"PS5"}), Some(Console::PlayStation)),
+        // SPD describes the source that is on now, even if the TV kept an older label.
+        (
+            json!({"label":"Xbox One","spdVendorName":"Nintendo"}),
+            Some(Console::NintendoSwitch),
+        ),
+        (json!({"label":"HDMI1"}), None),
+        (json!({"label":"Sony soundbar"}), None),
+        (json!({"label":"Switchbox AVR"}), None),
+    ];
+    for (mut raw, device) in cases {
+        raw["appId"] = json!("com.webos.app.hdmi1");
+        let input = normalize_inputs(&json!([raw])).unwrap().remove(0);
+        assert_eq!(input.device, device, "{raw}");
+    }
+}
+
+#[test]
+fn inputs_lead_the_home_strip_and_follow_the_console_on_a_shared_port() {
+    use crate::model::Console;
+    let mut state = ready();
+    let id = state.inventory.inputs[0].id.clone();
+    let apps: Vec<_> = state.apps().iter().map(|app| app.id.clone()).collect();
+    assert_eq!(apps[..2], ["com.webos.app.hdmi1", "com.webos.app.hdmi2"]);
+    assert!(!apps.contains(&"com.webos.app.hdmi3".to_string()));
+    // The desktop demo's HDMI 1 reports an Xbox, remembered by the first inventory.
+    assert_eq!(state.preferences.input_devices[&id], Console::Xbox);
+    let mut inputs = state.inventory.inputs.clone();
+    let face = state.input_app(&id).unwrap();
+    assert_eq!(
+        (face.title.as_str(), face.brand.as_str()),
+        ("Xbox", "input-xbox")
+    );
+    // The console sleeps: its card keeps the last identity, and saving is not repeated.
+    inputs[0].device = None;
+    inputs[0].signal = Some(false);
+    assert!(!state.set_inputs(inputs.clone()));
+    assert_eq!(state.input_app(&id).unwrap().brand, "input-xbox");
+    assert!(
+        scene(&state)
+            .draw
+            .iter()
+            .any(|d| matches!(d, Draw::Text(t, ..) if t == "HDMI 1 · No signal"))
+    );
+    // The Switch wakes on the same port.
+    inputs[0].device = Some(Console::NintendoSwitch);
+    inputs[0].signal = Some(true);
+    assert!(state.set_inputs(inputs));
+    let face = state.input_app(&id).unwrap();
+    assert_eq!(
+        (face.title.as_str(), face.brand.as_str()),
+        ("Nintendo Switch", "input-switch")
+    );
+    assert_eq!(
+        state.preferences.input_devices[&id],
+        Console::NintendoSwitch
+    );
+    // A custom name wins for the title.
+    state.preferences.set_input_name(&id, "Game room");
+    assert_eq!(state.input_app(&id).unwrap().title, "Game room");
+}
+
+#[test]
+fn input_cards_launch_but_cannot_be_reordered_or_opened_as_apps() {
+    let mut state = ready();
+    let id = state.inventory.inputs[0].id.clone();
+    state.focus = Target::App(id.clone());
+    state.hold();
+    assert!(state.moving.is_none());
+    state.options();
+    assert!(state.overlay.is_none());
+    assert_eq!(
+        state.activate(),
+        vec![crate::state::Effect::Launch(id.clone())]
+    );
+    state.open(1);
+    assert!(!state.apps().iter().any(|app| app.id == id));
 }

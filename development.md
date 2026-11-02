@@ -164,8 +164,7 @@ also uses **Clear name**.
 Choice checkmarks identify saved values, while the bright row fill identifies only the current focus.
 
 Home favorites form one horizontal strip, never a second row. Left/Right follows saved order,
-including reorder mode, and reveals complete cards. Up returns to Home navigation; Down enters
-the nearest input in the first row. The strip position survives page changes. Wheel movement over
+including reorder mode, and reveals complete cards. Up returns to Home navigation. The strip position survives page changes. Wheel movement over
 favorites scrolls horizontally; elsewhere it scrolls vertically. Pointer hover/down never moves
 the clicked control. Apps Up/Down follows the six-column grid order, including offscreen rows,
 and only the first row's Up route reaches the category toolbar. Scrolling Apps content fades into
@@ -185,6 +184,21 @@ the existing fallback when unavailable or malformed. Optional boolean `hdmiSigna
 only the detail to **No signal** when a cable is present. A stale positive signal cannot override
 an unplugged cable. A powered dongle stays visible in Auto even without signal; On/Off overrides
 and older firmware without signal information retain their behavior.
+
+Visible HDMI inputs are cards at the far left of the Home favorites strip, ordered by port, rather
+than a separate row. They launch like apps but are not favorites: they cannot be reordered, hidden
+from Apps or opened in app options, and they do not appear on the Apps page. Visibility and names
+stay in **Settings → Widgets → Inputs**. Each card shows its port (and **No signal** while the
+source sleeps) in the corner. A recognized console gives the card its name and colour: Xbox
+(green), Nintendo Switch (red) or PlayStation (blue). Recognition reads what the source reports
+about itself in `getAllInputStatus`: the HDMI SPD InfoFrame vendor/product and CEC OSD name fields
+first (`spdVendorName`, `spdProductDescription`, `cecDeviceName`, `osdName`, `deviceName`, …),
+then the TV's label and other short string values, since field names vary between firmware
+versions. Video frames are never sampled. The last console seen on each port is saved in
+`input_devices`, so a sleeping console keeps its card; on a shared port (an Xbox and a Switch on
+one HDMI switch or cable) the card follows whichever console reports itself next. A custom input
+name replaces the title, and a name such as "Switch" also picks the colour. Which fields a given
+TV firmware fills has not been verified on hardware.
 
 System text events update app/location queries; Done/Back stops editing and restores focus.
 

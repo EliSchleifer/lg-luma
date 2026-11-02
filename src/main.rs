@@ -454,6 +454,14 @@ fn wallpaper_upload_active(state: &State, webos: bool, focused: bool, visible: b
     visible && (!webos || focused) && matches!(state.overlay, Some(Overlay::WallpaperUpload))
 }
 
+/// A console newly announced on an input is remembered across restarts. Failures are logged
+/// only: the card still shows the console for this session.
+fn save_remembered_inputs(state: &State, preferences: &std::path::Path) {
+    if let Err(error) = storage::save(preferences, &state.preferences) {
+        eprintln!("{error}");
+    }
+}
+
 fn input_refresh_active(state: &State, webos: bool, focused: bool, visible: bool) -> bool {
     webos
         && focused
@@ -1096,7 +1104,9 @@ fn run() -> Result<(), String> {
                         options.test_extra_apps,
                         state.preferences.language,
                     );
-                    state.set_inventory(inventory, warning);
+                    if state.set_inventory(inventory, warning) {
+                        save_remembered_inputs(&state, &preferences_path);
+                    }
                     // Decode every installed icon now, on the artwork worker, rather than when
                     // the Apps page first shows it: a long-running Home then opens Apps ready.
                     assets.artwork.prefetch(
@@ -1656,8 +1666,10 @@ fn run() -> Result<(), String> {
         // stable until release, even if an input reply arrived in the same event-loop turn.
         let inputs_active =
             input_refresh_active(&state, webos, focused, visible) && press.is_none();
-        if let Some(inputs) = input_refresh.take_pending(inputs_active) {
-            state.set_inputs(inputs);
+        if let Some(inputs) = input_refresh.take_pending(inputs_active)
+            && state.set_inputs(inputs)
+        {
+            save_remembered_inputs(&state, &preferences_path);
         }
         if input_refresh.due(Instant::now(), inputs_active) {
             platform.send(Request::RefreshInputs);
