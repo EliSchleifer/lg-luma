@@ -2970,6 +2970,8 @@ pub fn input_icon_name(
 ) -> &'static str {
     match input_icon(input, custom, device) {
         "playstation" => "input-playstation",
+        "xbox" => "input-xbox",
+        "nintendo-switch" => "input-nintendo-switch",
         "apple-tv" => "input-apple-tv",
         "usb" => "input-usb",
         "console" => "input-console",
@@ -2988,10 +2990,11 @@ fn device_icon(name: &str) -> &'static str {
         "apple-tv"
     } else if name.contains("usb") {
         "usb"
-    } else if ["xbox", "switch", "console"]
-        .iter()
-        .any(|part| name.contains(part))
-    {
+    } else if name.contains("xbox") {
+        "xbox"
+    } else if name.contains("nintendo") || name == "switch" {
+        "nintendo-switch"
+    } else if ["switch", "console"].iter().any(|part| name.contains(part)) {
         "console"
     } else if ["pc", "computer", "laptop"]
         .iter()

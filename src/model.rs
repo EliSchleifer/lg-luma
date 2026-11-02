@@ -112,7 +112,7 @@ impl Console {
         }
     }
 
-    /// Card surface key (see `tools/assets.mjs`).
+    /// Card surface key (see `tools/assets.mjs`), in the console's official brand colour.
     pub fn brand(self) -> &'static str {
         match self {
             Self::Xbox => "input-xbox",
@@ -121,11 +121,12 @@ impl Console {
         }
     }
 
-    /// Interface icon, without the `input-` prefix used by the settings rows.
+    /// The console's brand mark, without the `input-` prefix used by the settings rows.
     pub fn icon(self) -> &'static str {
         match self {
+            Self::Xbox => "xbox",
+            Self::NintendoSwitch => "nintendo-switch",
             Self::PlayStation => "playstation",
-            Self::Xbox | Self::NintendoSwitch => "console",
         }
     }
 

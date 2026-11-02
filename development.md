@@ -189,8 +189,8 @@ Visible HDMI inputs are cards at the far left of the Home favorites strip, order
 than a separate row. They launch like apps but are not favorites: they cannot be reordered, hidden
 from Apps or opened in app options, and they do not appear on the Apps page. Visibility and names
 stay in **Settings → Widgets → Inputs**. Each card shows its port (and **No signal** while the
-source sleeps) in the corner. A recognized console gives the card its name and colour: Xbox
-(green), Nintendo Switch (red) or PlayStation (blue). Recognition reads what the source reports
+source sleeps) in the corner. A recognized console gives the card its name, brand mark and official
+colour: Xbox (#107C10), Nintendo Switch (#E60012) or PlayStation (#003791). Recognition reads what the source reports
 about itself in `getAllInputStatus`: the HDMI SPD InfoFrame vendor/product and CEC OSD name fields
 first (`spdVendorName`, `spdProductDescription`, `cecDeviceName`, `osdName`, `deviceName`, …),
 then the TV's label and other short string values, since field names vary between firmware
