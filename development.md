@@ -842,13 +842,13 @@ runtime font/translation services or telemetry are used. Weather attribution: Op
 ## Update availability
 
 On interactive desktop or TV startup a separate worker checks
-`https://github.com/ecklf/lg-luma/releases/latest/download/repo.json` once per process automatically.
+`https://luma.elischleifer.com/repo.json` once per process automatically.
 **Settings → System → Check again** retries on the same worker, with one request in flight at a time.
 It only reads the `com.ecklf.luma` package/manifest version and compares numeric major/minor/patch
 components with the compiled version. Equal, older, malformed or prerelease versions do not offer
 updates. HTTP is HTTPS-only with bounded redirects, a ten-second timeout, a 256 KiB reply limit and
 no proxy; failures are logged without interrupting launch and the status card offers retry.
-Scripted captures and simulated update previews do not contact GitHub. Interactive desktop checks
+Scripted captures and simulated update previews do not contact the release server. Interactive desktop checks
 use the same endpoint and worker as TV. The card shows the current version and only reports
 **No newer version found** after a successful check, never while unchecked or offline.
 A newer version shows an **Update available** notice and a **Settings → System** card with both
@@ -1076,3 +1076,54 @@ synchronization, copied recovery files, protected uninstall rejection, and compl
 new disposable test app through status 31. The previous build, preferences and integration policy
 were restored after testing. Manifest takeover on webOS 10/11 is covered by fixtures, but was not
 tested on hardware in this run; standby and cold boot were not tested.
+
+## Release hosting (Cloudflare R2)
+
+Releases are mirrored to a Cloudflare R2 bucket served at `https://luma.elischleifer.com`, so TVs can use
+`https://luma.elischleifer.com/repo.json` as their Homebrew Channel repository and the in-app updater
+(`src/update.rs`) reads the same feed. Only IPKs under `https://luma.elischleifer.com/releases/` are
+accepted for self-update.
+
+Bucket layout:
+
+```text
+repo.json                  latest feed, asset URLs rewritten to luma.elischleifer.com (60 s cache)
+releases/vX.Y.Z/*.ipk      immutable release assets, sha256sums, description, icon
+releases/vX.Y.Z/repo.json  that release's mirrored feed
+```
+
+After the CI `release` job publishes a GitHub release, the `mirror` job calls
+`.github/workflows/publish-r2.yml`. It downloads the release assets, verifies `sha256sums`, rewrites
+the feed with `tools/mirror-feed.mjs` and uploads to R2 through its S3-compatible API (versioned assets
+first, root feed last). If a zone purge token is configured it also purges `/repo.json` from
+Cloudflare's cache; otherwise the 60-second `Cache-Control` bounds staleness. Run **Publish to
+Cloudflare R2** manually to backfill or re-mirror a tag; only the latest GitHub release may replace
+the root feed.
+
+### One-time Cloudflare setup
+
+1. **R2 → Create bucket**, e.g. `luma` (location: Automatic).
+2. **Bucket → Settings → Custom Domains → Connect Domain** → `luma.elischleifer.com`. Cloudflare creates
+   the DNS record and certificate. Leave the `r2.dev` public URL disabled.
+3. **R2 → Manage API tokens → Create API token** (Account API token): permission **Object Read & Write**,
+   scoped to the `luma` bucket only. Copy the Access Key ID and Secret Access Key, and note the account
+   ID shown on the R2 overview page.
+4. Optional cache purge: **My Profile → API Tokens → Create Token** with **Zone → Cache Purge** for
+   `elischleifer.com`; note the zone ID from the domain's Overview page.
+
+### GitHub configuration
+
+Settings → Secrets and variables → Actions:
+
+| Kind                | Name                     | Value                                   |
+| ------------------- | ------------------------ | --------------------------------------- |
+| Secret              | `R2_ACCESS_KEY_ID`       | R2 token Access Key ID                  |
+| Secret              | `R2_SECRET_ACCESS_KEY`   | R2 token Secret Access Key              |
+| Variable            | `CLOUDFLARE_ACCOUNT_ID`  | Cloudflare account ID                   |
+| Variable            | `R2_BUCKET`              | bucket name, e.g. `luma`                |
+| Secret (optional)   | `CLOUDFLARE_PURGE_TOKEN` | zone cache-purge token                  |
+| Variable (optional) | `CLOUDFLARE_ZONE_ID`     | `elischleifer.com` zone ID              |
+| Variable (optional) | `LUMA_PUBLIC_URL`        | default `https://luma.elischleifer.com` |
+
+Then run **Publish to Cloudflare R2** once with an empty tag to mirror the current release, and check
+`curl -sI https://luma.elischleifer.com/repo.json`.

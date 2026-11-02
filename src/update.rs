@@ -2,7 +2,7 @@ pub mod discovery {
     use serde::{Deserialize, Serialize};
     use std::{io::Read, sync::mpsc, thread, time::Duration};
 
-    const FEED: &str = "https://github.com/ecklf/lg-luma/releases/latest/download/repo.json";
+    use super::FEED;
     const LIMIT: usize = 256 * 1024;
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -271,10 +271,11 @@ use std::{
     time::Instant,
 };
 
-pub const FEED: &str = "https://github.com/ecklf/lg-luma/releases/latest/download/repo.json";
+/// The Homebrew Channel feed this fork mirrors to Cloudflare R2 (see `.github/workflows/publish-r2.yml`).
+pub const FEED: &str = "https://luma.elischleifer.com/repo.json";
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// Only IPKs from this project's own release assets are installed.
-const RELEASES: &str = "https://github.com/ecklf/lg-luma/releases/download/";
+const RELEASES: &str = "https://luma.elischleifer.com/releases/";
 /// A fresh directory per attempt; never truncate a predictable path in shared /tmp.
 fn download_directory() -> Result<(String, PathBuf), String> {
     use ring::rand::SecureRandom;
@@ -419,7 +420,7 @@ fn check(agent: &ureq::Agent) -> Result<Option<Release>, String> {
         .get(FEED)
         .header("User-Agent", "LumaNative")
         .call()
-        .map_err(|_| "GitHub is unavailable. Try again shortly.")?;
+        .map_err(|_| "The release server is unavailable. Try again shortly.")?;
     let mut bytes = Vec::new();
     response
         .body_mut()
@@ -585,8 +586,7 @@ mod tests {
         }}]})
     }
 
-    const URL: &str =
-        "https://github.com/ecklf/lg-luma/releases/download/v9.0.0/com.ecklf.luma_9.0.0_arm.ipk";
+    const URL: &str = "https://luma.elischleifer.com/releases/v9.0.0/com.ecklf.luma_9.0.0_arm.ipk";
 
     #[test]
     fn attempt_paths_are_private_unique_and_results_are_terminal_only_when_finished() {
@@ -669,7 +669,7 @@ mod tests {
             ),
             feed(
                 "9.0.0",
-                "https://github.com/ecklf/lg-luma/releases/download/../x_arm.ipk",
+                "https://luma.elischleifer.com/releases/../x_arm.ipk",
                 &sha,
                 1000,
             ),
