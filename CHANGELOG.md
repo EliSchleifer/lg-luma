@@ -1,5 +1,11 @@
 # lg-luma
 
+## 2.17.0
+
+### Minor Changes
+
+- 6dfef37: Host releases on Cloudflare R2 at https://luma.elischleifer.com: CI mirrors each published release to R2, and the in-app updater reads https://luma.elischleifer.com/repo.json.
+
 ## 2.16.2
 
 ### Patch Changes
