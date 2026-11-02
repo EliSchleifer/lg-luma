@@ -8,7 +8,7 @@ the host SVG compiler in `tools/vector-assets/`, packaging/tooling in `tools/`, 
 scripts in `tests/`. There is no React/JSX/browser application. Read `development.md` for details.
 
 Use pnpm, Oxlint and Oxfmt for build tools; Cargo/rustfmt/Clippy for Rust. `nix develop` supplies
-pinned Rust 1.93, ARMv7 std, Node 24, pnpm 10.34.5, SDL2, woff2 and Python/fontTools. The webOS
+pinned Rust 1.99.1, ARMv7 std, Node 24, pnpm 10.34.5, SDL2, woff2 and Python/fontTools. The webOS
 SDK is separate: `pnpm sdk`, then set `WEBOS_NDK` to `.build/toolchain/arm-webos-linux-gnueabi_sdk-buildroot`.
 
 ```sh

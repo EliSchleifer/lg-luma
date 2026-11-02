@@ -634,7 +634,9 @@ pub fn read_app_icons(source: &app_artwork::Source) -> Result<Vec<Vec<u8>>, Stri
             }
             remaining -= hex.len() / 2;
             hex.as_bytes()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| {
                     let digit = |b: u8| {
                         (b as char)

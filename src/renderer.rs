@@ -879,7 +879,7 @@ impl Renderer {
             }
             match self.glyph(c, selected) {
                 Ok(geometry) => {
-                    for triangle in geometry.chunks_exact(3) {
+                    for triangle in geometry.as_chunks::<3>().0 {
                         // True sample coverage needs only the original fill.
                         // Exclude the boundary fringe, not just its alpha.
                         if multisampled && triangle.iter().any(|vertex| vertex.coverage < 1.) {
@@ -1685,7 +1685,12 @@ impl Renderer {
         self.stats = stats;
         let mut differing = 0;
         let mut largest = 0;
-        for (a, b) in window.chunks_exact(4).zip(full.chunks_exact(4)) {
+        for (a, b) in window
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(full.as_chunks::<4>().0)
+        {
             let difference = (0..3).map(|i| a[i].abs_diff(b[i])).max().unwrap_or(0);
             largest = largest.max(difference);
             differing += usize::from(difference > 16);

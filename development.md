@@ -32,7 +32,7 @@ pnpm assets
 pnpm dev
 ```
 
-The flake supplies Rust 1.93, Cargo/rustfmt/Clippy, Node.js 24, pnpm 10.34.5, SDL2, pkg-config,
+The flake supplies Rust 1.99.1, Cargo/rustfmt/Clippy, Node.js 24, pnpm 10.34.5, SDL2, pkg-config,
 woff2, Python/fontTools, CMake and Git. Linux includes Mesa and Xvfb. Supported Nix hosts are
 Apple Silicon macOS and ARM64/x86-64 Linux. Without Nix, supply those tools and Rust 1.88+,
 including `armv7-unknown-linux-gnueabi` for TV builds. No browser installation is needed.

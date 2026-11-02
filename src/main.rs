@@ -1552,15 +1552,15 @@ fn run() -> Result<(), String> {
                     mouse_x,
                     mouse_y,
                     ..
-                } if state.overlay.is_none() => {
-                    if state.wheel_scroll(
+                } if state.overlay.is_none()
+                    && state.wheel_scroll(
                         &scene.controls,
                         pointer_position(&window, mouse_x, mouse_y),
                         x,
                         y,
-                    ) {
-                        press = None;
-                    }
+                    ) =>
+                {
+                    press = None;
                 }
                 _ => {}
             }
