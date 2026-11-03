@@ -1,5 +1,11 @@
 # lg-luma
 
+## 2.17.1
+
+### Patch Changes
+
+- 1066b08: Releases are published by the manual Release workflow instead of merging a Version Packages PR.
+
 ## 2.17.0
 
 ### Minor Changes
