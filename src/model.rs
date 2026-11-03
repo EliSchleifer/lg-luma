@@ -88,6 +88,69 @@ pub struct Input {
     pub connected: Option<bool>,
     /// Optional signal information; never overrides the cable state or Auto visibility.
     pub signal: Option<bool>,
+    /// The console the source currently announces over HDMI (CEC OSD name or SPD InfoFrame),
+    /// when the TV reports one. Only present while the source is awake.
+    pub device: Option<Console>,
+}
+
+/// A game console recognized from what an HDMI source reports about itself. A shared port
+/// (for example HDMI 1 used by both an Xbox and a Switch) follows whichever one is awake.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Console {
+    Xbox,
+    NintendoSwitch,
+    PlayStation,
+}
+
+impl Console {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Xbox => "Xbox",
+            Self::NintendoSwitch => "Nintendo Switch",
+            Self::PlayStation => "PlayStation",
+        }
+    }
+
+    /// Card surface key (see `tools/assets.mjs`), in the console's official brand colour.
+    pub fn brand(self) -> &'static str {
+        match self {
+            Self::Xbox => "input-xbox",
+            Self::NintendoSwitch => "input-switch",
+            Self::PlayStation => "input-playstation",
+        }
+    }
+
+    /// The console's brand mark, without the `input-` prefix used by the settings rows.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Xbox => "xbox",
+            Self::NintendoSwitch => "nintendo-switch",
+            Self::PlayStation => "playstation",
+        }
+    }
+
+    /// Recognize one reported string: a CEC OSD name ("Xbox One", "NintendoSwitch", "PS5")
+    /// or an SPD vendor/product ("Microsoft"/"MSFT", "Nintendo", "SIE"/"SCEI").
+    pub fn detect(text: &str) -> Option<Self> {
+        let name: String = text
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if name.contains("xbox") || name.starts_with("microsoft") || name == "msft" {
+            Some(Self::Xbox)
+        } else if name.contains("nintendo") || name == "switch" || name == "switch2" {
+            Some(Self::NintendoSwitch)
+        } else if name.contains("playstation")
+            || ["ps3", "ps4", "ps5", "sie", "scei", "sonyinteractive"].contains(&name.as_str())
+            || name.starts_with("sonyinteractive")
+        {
+            Some(Self::PlayStation)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -235,6 +298,9 @@ pub struct Preferences {
     pub input_modes: BTreeMap<String, InputMode>,
     /// Custom names by input app ID; the TV's port and label stay visible as detail.
     pub input_names: BTreeMap<String, String>,
+    /// The console each input last announced, so its Home card keeps that identity while the
+    /// console sleeps. A shared port switches as soon as another console reports itself.
+    pub input_devices: BTreeMap<String, Console>,
     #[serde(deserialize_with = "crate::weather::deserialize_enabled")]
     pub show_weather: bool,
     #[serde(deserialize_with = "crate::weather::deserialize_location")]
@@ -273,6 +339,7 @@ impl Default for Preferences {
             date_format: DateFormat::default(),
             input_modes: BTreeMap::new(),
             input_names: BTreeMap::new(),
+            input_devices: BTreeMap::new(),
             show_weather: true,
             weather_location: None,
             temperature_unit: Unit::Celsius,
@@ -345,12 +412,35 @@ impl Preferences {
         Some(self.custom_tiles.remove(index))
     }
 
+    /// Whether the input has a Home card. Auto needs a positive cable report and no
+    /// "no signal" report, so a console that is unplugged or switched off takes no slot.
+    /// Firmware without signal information falls back to the cable state.
     pub fn input_visible(&self, input: &Input) -> bool {
         match self.input_modes.get(&input.id).copied().unwrap_or_default() {
             InputMode::On => true,
             InputMode::Off => false,
-            InputMode::Auto => input.connected == Some(true),
+            InputMode::Auto => input.connected == Some(true) && input.signal != Some(false),
         }
+    }
+
+    /// The console an input reports now, otherwise the one it reported last.
+    pub fn input_device(&self, input: &Input) -> Option<Console> {
+        input
+            .device
+            .or_else(|| self.input_devices.get(&input.id).copied())
+    }
+
+    /// Remember consoles the inputs report now; returns whether preferences changed.
+    pub fn remember_input_devices(&mut self, inputs: &[Input]) -> bool {
+        let mut changed = false;
+        for input in inputs {
+            if let Some(device) = input.device
+                && self.input_devices.insert(input.id.clone(), device) != Some(device)
+            {
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn input_name(&self, input: &Input) -> Option<&str> {
@@ -420,6 +510,7 @@ impl Preferences {
             self.custom_tiles.truncate(TILE_LIMIT);
         }
         self.input_modes.retain(|id, _| valid_app_id(id));
+        self.input_devices.retain(|id, _| valid_app_id(id));
         self.input_names = std::mem::take(&mut self.input_names)
             .into_iter()
             .filter(|(id, _)| valid_app_id(id))
@@ -575,10 +666,11 @@ pub fn demo_inventory() -> Inventory {
         inputs: vec![
             Input {
                 id: "com.webos.app.hdmi1".into(),
-                title: "PlayStation 5".into(),
+                title: "Xbox One".into(),
                 port: "HDMI 1".into(),
                 connected: Some(true),
                 signal: None,
+                device: Some(Console::Xbox),
             },
             Input {
                 id: "com.webos.app.hdmi2".into(),
@@ -586,6 +678,7 @@ pub fn demo_inventory() -> Inventory {
                 port: "HDMI 2".into(),
                 connected: Some(true),
                 signal: None,
+                device: None,
             },
             Input {
                 id: "com.webos.app.hdmi3".into(),
@@ -593,6 +686,7 @@ pub fn demo_inventory() -> Inventory {
                 port: "HDMI 3".into(),
                 connected: Some(false),
                 signal: None,
+                device: None,
             },
         ],
     };

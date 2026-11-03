@@ -25,7 +25,9 @@
 - Lucide interface icons: exported standalone SVG sources in `assets/ui-icons/`, ISC license
   bundled at `assets/licenses/lucide.txt`. The Luma upload icon and the small `luma-mark.svg` reuse
   original project artwork under MIT. PlayStation/Apple TV input paths were supplied by the user;
-  the brand marks belong to Sony/Apple. Spotify/Kodi symbol treatments use the original native
+  the brand marks belong to Sony/Apple. `input-xbox.svg` and `input-nintendo-switch.svg` are the
+  Simple Icons 12.0.0 marks (CC0, later removed upstream; source URLs in each file); the marks belong
+  to Microsoft/Nintendo. Spotify/Kodi symbol treatments use the original native
   artwork. Logos identify third-party apps; Luma is unaffiliated with their owners.
 - SDL-webOS 2.30.12 (`release-2.30.12-webos.5`, standard SDL ABI), zlib license.
   `tools/webos-runtime.mjs` records archive/library SHA-256. Notice at `assets/licenses/sdl2.txt`.

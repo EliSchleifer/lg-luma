@@ -36,7 +36,7 @@
         pkgs:
         let
           # Match the native CI toolchain and include the TV's soft-float Rust std.
-          rust = pkgs.rust-bin.stable."1.93.0".minimal.override {
+          rust = pkgs.rust-bin.stable."1.99.1".minimal.override {
             extensions = [
               "clippy"
               "rustfmt"

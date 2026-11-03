@@ -39,7 +39,7 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
       - name: Cache Rust dependencies
@@ -145,7 +145,7 @@ jobs:
           node-version: '24'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: armv7-unknown-linux-gnueabi
       - uses: Swatinem/rust-cache@v2

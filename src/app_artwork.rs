@@ -161,9 +161,10 @@ fn thumbnail(mut image: RgbaImage) -> RgbaImage {
         .into_rgba8();
     for pixel in pixels.pixels_mut() {
         let alpha = pixel[3] as u32;
-        if alpha > 0 {
-            for channel in 0..3 {
-                pixel[channel] = ((pixel[channel] as u32 * 255 + alpha / 2) / alpha).min(255) as u8;
+        for channel in 0..3 {
+            // Fully transparent pixels have no colour to un-premultiply.
+            if let Some(value) = (pixel[channel] as u32 * 255 + alpha / 2).checked_div(alpha) {
+                pixel[channel] = value.min(255) as u8;
             }
         }
     }
@@ -198,7 +199,7 @@ fn bleed(pixels: &mut RgbaImage, passes: usize) {
                 if count > 0 {
                     let pixel = pixels.get_pixel_mut(x, y);
                     for channel in 0..3 {
-                        pixel[channel] = (sum[channel] / count) as u8;
+                        pixel[channel] = sum[channel].checked_div(count).unwrap_or(0) as u8;
                     }
                     coloured[(y * width + x) as usize] = true;
                 }

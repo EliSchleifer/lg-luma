@@ -22,6 +22,18 @@ fn ready() -> State {
     state
 }
 
+/// Home without its leading HDMI cards, for tests about favorites-strip geometry.
+fn favorites_only() -> State {
+    let mut state = ready();
+    for input in &state.inventory.inputs {
+        state
+            .preferences
+            .input_modes
+            .insert(input.id.clone(), InputMode::Off);
+    }
+    state
+}
+
 #[test]
 fn home_relaunch_returns_from_apps_and_settings() {
     for page in [1, 2] {
@@ -168,7 +180,7 @@ fn controls(state: &State) -> Vec<crate::state::Control> {
 
 #[test]
 fn favorites_edge_fragments_share_draw_hit_and_wheel_viewports() {
-    let mut state = ready();
+    let mut state = favorites_only();
     let favorites: Vec<_> = state
         .inventory
         .apps
@@ -234,7 +246,8 @@ fn widening_favorites_does_not_widen_apps_or_unclip_offscreen_rows() {
 fn remote_routes_from_header_and_back_through_settings() {
     let mut state = ready();
     state.direction(Direction::Down, &controls(&state));
-    assert_eq!(state.focus, Target::App("netflix".into()));
+    // Connected HDMI inputs lead the Home strip.
+    assert_eq!(state.focus, Target::App("com.webos.app.hdmi1".into()));
     state.direction(Direction::Up, &controls(&state));
     assert_eq!(state.focus, Target::Nav(0));
     state.open(2);
@@ -330,7 +343,12 @@ fn partial_refresh_preserves_valid_inputs_and_never_invents_tv_apps() {
     );
     assert!(state.inventory.apps.is_empty());
     assert_eq!(state.inventory.inputs.len(), 3);
-    assert_eq!(state.first_content(), Target::Browse);
+    // Preserved inputs still lead Home; no TV app is invented.
+    assert_eq!(
+        state.first_content(),
+        Target::App("com.webos.app.hdmi1".into())
+    );
+    assert!(state.apps().iter().all(|app| state.is_input(&app.id)));
 }
 
 #[test]
@@ -420,6 +438,7 @@ fn auto_input_visibility_requires_a_positive_connection_report() {
         port: "HDMI 1".into(),
         connected: None,
         signal: None,
+        device: None,
     };
     assert!(!preferences.input_visible(&input));
     input.connected = Some(true);
@@ -1175,7 +1194,7 @@ fn delete_confirmation_defaults_to_cancel_and_back_restores_side_popup() {
 fn opening_side_popup_preserves_card_artwork_geometry_with_or_without_captions() {
     for page in [0, 1] {
         for names in [false, true] {
-            let mut state = ready();
+            let mut state = favorites_only();
             state.preferences.show_app_names = names;
             state.preferences.show_home_names = names;
             state.open(page);
@@ -1908,6 +1927,7 @@ fn custom_input_names_keep_the_label_port_and_status_as_detail() {
         port: "HDMI 2".into(),
         connected: Some(true),
         signal: None,
+        device: None,
     };
     let language = preferences.language;
     let status = |preferences: &Preferences| {
@@ -2770,7 +2790,7 @@ fn category_focus_active_and_clear_button_share_the_pill_style() {
 }
 
 #[test]
-fn clock_date_and_home_input_descriptions_use_larger_text() {
+fn clock_and_date_use_larger_text() {
     use crate::renderer::Draw;
     for language in crate::i18n::Language::ALL {
         let mut state = ready();
@@ -2792,15 +2812,6 @@ fn clock_date_and_home_input_descriptions_use_larger_text() {
                 Draw::Text(text, rect, style, ..) if text == &label && style.size == size && rect.h >= size
             )));
         }
-        let input = &state.inventory.inputs[0];
-        let description = view::input_status(
-            input,
-            state.preferences.input_name(input).is_some(),
-            language,
-        );
-        assert!(rendered.draw.iter().any(|draw| matches!(draw,
-            Draw::Text(text, rect, style, ..) if text == &description && style.size == 16.8 && rect.h == 25.2
-        )));
     }
 }
 

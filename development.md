@@ -32,7 +32,7 @@ pnpm assets
 pnpm dev
 ```
 
-The flake supplies Rust 1.93, Cargo/rustfmt/Clippy, Node.js 24, pnpm 10.34.5, SDL2, pkg-config,
+The flake supplies Rust 1.99.1, Cargo/rustfmt/Clippy, Node.js 24, pnpm 10.34.5, SDL2, pkg-config,
 woff2, Python/fontTools, CMake and Git. Linux includes Mesa and Xvfb. Supported Nix hosts are
 Apple Silicon macOS and ARM64/x86-64 Linux. Without Nix, supply those tools and Rust 1.88+,
 including `armv7-unknown-linux-gnueabi` for TV builds. No browser installation is needed.
@@ -164,8 +164,7 @@ also uses **Clear name**.
 Choice checkmarks identify saved values, while the bright row fill identifies only the current focus.
 
 Home favorites form one horizontal strip, never a second row. Left/Right follows saved order,
-including reorder mode, and reveals complete cards. Up returns to Home navigation; Down enters
-the nearest input in the first row. The strip position survives page changes. Wheel movement over
+including reorder mode, and reveals complete cards. Up returns to Home navigation. The strip position survives page changes. Wheel movement over
 favorites scrolls horizontally; elsewhere it scrolls vertically. Pointer hover/down never moves
 the clicked control. Apps Up/Down follows the six-column grid order, including offscreen rows,
 and only the first row's Up route reaches the category toolbar. Scrolling Apps content fades into
@@ -180,11 +179,26 @@ preferences are not reloaded. At most one input read is queued, errors retain th
 and retry after ten seconds, and an unchanged snapshot does not redraw. Holds, reordering, overlays,
 loading and hidden/unfocused pages pause polling and defer pending snapshots, keeping pointer
 targets stationary through release. A later complete inventory supersedes deferred input data.
-Auto visibility remains cable-based: boolean `hdmiPlugIn` takes priority over `connected`, with
-the existing fallback when unavailable or malformed. Optional boolean `hdmiSignalExist` changes
-only the detail to **No signal** when a cable is present. A stale positive signal cannot override
-an unplugged cable. A powered dongle stays visible in Auto even without signal; On/Off overrides
-and older firmware without signal information retain their behavior.
+The cable state comes from boolean `hdmiPlugIn`, which takes priority over `connected`, with
+the existing fallback when unavailable or malformed. Auto shows an input's Home card only while
+the cable is present and the TV does not report `hdmiSignalExist: false`, so a console that is
+unplugged or switched off takes no slot and the cards after it close the gap. A stale positive
+signal cannot override an unplugged cable. Firmware without signal information falls back to the
+cable state. **On** keeps the card (with **No signal** in its corner) and **Off** hides it.
+
+Visible HDMI inputs are cards at the far left of the Home favorites strip, ordered by port, rather
+than a separate row. They launch like apps but are not favorites: they cannot be reordered, hidden
+from Apps or opened in app options, and they do not appear on the Apps page. Visibility and names
+stay in **Settings → Widgets → Inputs**. Each card shows its port in the corner. A recognized console gives the card its name, brand mark and official
+colour: Xbox (#107C10), Nintendo Switch (#E60012) or PlayStation (#003791). Recognition reads what the source reports
+about itself in `getAllInputStatus`: the HDMI SPD InfoFrame vendor/product and CEC OSD name fields
+first (`spdVendorName`, `spdProductDescription`, `cecDeviceName`, `osdName`, `deviceName`, …),
+then the TV's label and other short string values, since field names vary between firmware
+versions. Video frames are never sampled. The last console seen on each port is saved in
+`input_devices`, so a console keeps its identity when its card returns; on a shared port (an Xbox and a Switch on
+one HDMI switch or cable) the card follows whichever console reports itself next. A custom input
+name replaces the title, and a name such as "Switch" also picks the colour. Which fields a given
+TV firmware fills has not been verified on hardware.
 
 System text events update app/location queries; Done/Back stops editing and restores focus.
 

@@ -75,7 +75,7 @@ try {
     return state;
   };
   const home = await scenario('home', 'down');
-  assert.deepEqual(home.focus, { App: 'netflix' });
+  assert.deepEqual(home.focus, { App: 'com.webos.app.hdmi1' });
   const recents = await scenario('recents', 'recents,await-recents');
   assert.equal(recents.modal, true);
   assert.deepEqual(recents.focus, { Recent: 'netflix' });
@@ -169,7 +169,8 @@ try {
   }
   const settings = await scenario('settings', 'settings,down,down,enter,down,enter,enter');
   assert.equal(settings.preferences.background, 'forest');
-  const saved = await scenario('saved', 'down,hold,right,back');
+  // HDMI 1 and HDMI 2 lead the strip and stay put; Netflix is the first favorite.
+  const saved = await scenario('saved', 'down,right,right,hold,right,back');
   assert.equal(saved.preferences.background, 'forest');
   assert.deepEqual(saved.preferences.favorites.slice(0, 2), ['youtube.leanback.v4', 'netflix']);
   const upload = await scenario(
@@ -492,7 +493,12 @@ try {
   ];
   await fs.writeFile(
     preferences,
-    JSON.stringify({ favorites: edgeFavorites, show_weather: false }),
+    // Inputs off: this checks favorites-strip geometry from the first slot.
+    JSON.stringify({
+      favorites: edgeFavorites,
+      show_weather: false,
+      input_modes: { 'com.webos.app.hdmi1': 'Off', 'com.webos.app.hdmi2': 'Off' },
+    }),
   );
   const edgeRight = await scenario('favorites-edge-right', 'home,click:1860:600');
   assert.deepEqual(edgeRight.focus, { App: edgeFavorites[6] });
