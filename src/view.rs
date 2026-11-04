@@ -862,9 +862,7 @@ fn tile(
     names: bool,
     pinned: bool,
 ) {
-    let input_face = (state.page == Page::Home)
-        .then(|| state.input_app(&app.id))
-        .flatten();
+    let input_face = state.input_app(&app.id);
     let app = input_face.as_ref().unwrap_or(app);
     let caption_height = if names {
         caption_height(state, assets, app, rect.w)
@@ -2295,6 +2293,11 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                         Some(language.t("inputWhenConnected")),
                         current == InputMode::Auto,
                     ),
+                    (
+                        language.t("stateAppsOnly"),
+                        Some(language.t("inputAppsOnly")),
+                        current == InputMode::Apps,
+                    ),
                 ]
             }
             Subpage::Temperature => vec![
@@ -2353,7 +2356,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             );
         }
         if let Subpage::Input(id) = subpage {
-            input_name_rows(out, state, assets, id, 164.8 + 3. * 102.7 + 16. - s);
+            input_name_rows(out, state, assets, id, 164.8 + 4. * 102.7 + 16. - s);
         }
         if let Some(opened) = state.panel_started {
             out.fade(
@@ -2702,6 +2705,7 @@ fn inputs_settings(out: &mut Scene, state: &State, assets: &Assets) {
                     InputMode::On => "stateOn",
                     InputMode::Off => "stateOff",
                     InputMode::Auto => "stateAuto",
+                    InputMode::Apps => "stateAppsOnly",
                 })),
                 description: Some(&input_status(
                     input,

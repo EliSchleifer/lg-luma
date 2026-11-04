@@ -165,6 +165,9 @@ pub enum InputMode {
     Auto,
     On,
     Off,
+    /// Kept off the Home strip, but listed on the Apps page while connected with a signal,
+    /// for sources such as a soundbar that rarely need their own card.
+    Apps,
 }
 
 /// POST is the default because Home Assistant webhooks accept only POST and PUT
@@ -321,6 +324,12 @@ pub struct Preferences {
     pub wallpaper_changed: u64,
 }
 
+/// Cable reported present and the TV not reporting "no signal". Firmware without signal
+/// information falls back to the cable state.
+fn input_live(input: &Input) -> bool {
+    input.connected == Some(true) && input.signal != Some(false)
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -419,11 +428,21 @@ impl Preferences {
     /// "no signal" report, so a console that is unplugged or switched off takes no slot.
     /// Firmware without signal information falls back to the cable state.
     pub fn input_visible(&self, input: &Input) -> bool {
-        match self.input_modes.get(&input.id).copied().unwrap_or_default() {
+        match self.input_mode(input) {
             InputMode::On => true,
-            InputMode::Off => false,
-            InputMode::Auto => input.connected == Some(true) && input.signal != Some(false),
+            InputMode::Off | InputMode::Apps => false,
+            InputMode::Auto => input_live(input),
         }
+    }
+
+    /// Whether the input is listed on the Apps page: only "Apps only" inputs, and only while
+    /// they are connected with a signal, using the same test as Auto.
+    pub fn input_in_apps(&self, input: &Input) -> bool {
+        self.input_mode(input) == InputMode::Apps && input_live(input)
+    }
+
+    pub fn input_mode(&self, input: &Input) -> InputMode {
+        self.input_modes.get(&input.id).copied().unwrap_or_default()
     }
 
     /// The console an input reports now, otherwise the one it reported last.
