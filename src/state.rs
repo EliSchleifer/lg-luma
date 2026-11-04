@@ -1661,9 +1661,6 @@ impl State {
             self.panel_started = (!self.preferences.reduced_motion).then(crate::clock::now);
             self.dirty = true;
         } else if let Target::App(id) = &self.focus {
-            if self.is_input(id) {
-                return;
-            }
             self.overlay = Some(Overlay::Options {
                 id: id.clone(),
                 restore: self.focus.clone(),
@@ -1728,12 +1725,59 @@ impl State {
         vec![Effect::Save, Effect::Refresh]
     }
 
+    /// Whether an input counts as a favorite: it has a Home card (On or Auto).
+    pub fn input_favorite(&self, id: &str) -> bool {
+        matches!(
+            self.preferences
+                .input_modes
+                .get(id)
+                .copied()
+                .unwrap_or_default(),
+            InputMode::On | InputMode::Auto
+        )
+    }
+
+    /// "Remove from favorites" moves an input to Apps only; "Add to favorites" returns it to
+    /// Auto. Its card leaves or rejoins the Home strip, and focus moves to a neighbour if needed.
+    fn toggle_input_favorite(&mut self) -> Vec<Effect> {
+        let Some(Overlay::Options { id, restore }) = self.overlay.take() else {
+            return vec![];
+        };
+        self.panel_started = None;
+        let old_ids: Vec<_> = self.apps().iter().map(|a| a.id.clone()).collect();
+        let old_index = old_ids.iter().position(|item| item == &id).unwrap_or(0);
+        let title = self.input_app(&id).map_or(id.clone(), |app| app.title);
+        let (mode, key) = if self.input_favorite(&id) {
+            (InputMode::Apps, "favoriteRemoved")
+        } else {
+            (InputMode::Auto, "favoriteAdded")
+        };
+        self.preferences.input_modes.insert(id, mode);
+        self.notify(self.preferences.language.format(key, &[("app", &title)]));
+        self.focus = restore;
+        self.pointer = false;
+        if let Target::App(id) = &self.focus {
+            let apps = self.apps();
+            if !apps.iter().any(|app| &app.id == id) {
+                self.focus = apps
+                    .get(old_index.min(apps.len().saturating_sub(1)))
+                    .map(|app| Target::App(app.id.clone()))
+                    .unwrap_or_else(|| self.first_content());
+            }
+        }
+        self.dirty = true;
+        vec![Effect::Save]
+    }
+
     pub fn hold(&mut self) {
         if self.page == Page::Home && self.overlay.is_none() {
-            // Input cards stay at the front of the strip; only favorites reorder.
-            if let Target::App(id) = &self.focus
-                && !self.is_input(id)
-            {
+            // Input cards stay at the front of the strip and do not reorder; holding one
+            // opens its options instead, where it can be removed from favorites.
+            if let Target::App(id) = &self.focus {
+                if self.is_input(id) {
+                    self.options();
+                    return;
+                }
                 self.moving = Some(id.clone());
                 self.notice = None;
                 self.dirty = true;
@@ -2041,17 +2085,13 @@ impl State {
                 self.pressed = None;
             }
             Target::TvSettings => return vec![Effect::Launch("com.palm.app.settings".into())],
-            Target::App(id)
-                if self.page == Page::Apps && !self.launching && !self.is_input(&id) =>
-            {
-                self.options()
-            }
+            Target::App(_) if self.page == Page::Apps && !self.launching => self.options(),
             Target::App(id) if !self.launching => {
                 return vec![Effect::Launch(id)];
             }
             Target::OpenApp if !self.launching => {
                 if let Some(Overlay::Options { id, .. }) = &self.overlay
-                    && self.inventory.apps.iter().any(|app| &app.id == id)
+                    && (self.inventory.apps.iter().any(|app| &app.id == id) || self.is_input(id))
                 {
                     let id = id.clone();
                     self.back();
@@ -2426,6 +2466,15 @@ impl State {
                 return vec![Effect::Save];
             }
             Target::Option(index) => {
+                if let Some(Overlay::Options { id, .. }) = &self.overlay
+                    && self.is_input(id)
+                {
+                    return if index == 0 {
+                        self.toggle_input_favorite()
+                    } else {
+                        vec![]
+                    };
+                }
                 if index == 2 {
                     if let Some(Overlay::Options { id, restore }) = &self.overlay
                         && crate::platform::can_uninstall(id)

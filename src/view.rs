@@ -687,8 +687,14 @@ pub fn scene_with_pill(
                     } else {
                         state.preferences.show_app_names
                     };
+                    let face = state.input_app(id);
                     if names
-                        && let Some(app) = state.inventory.apps.iter().find(|app| &app.id == id)
+                        && let Some(app) = state
+                            .inventory
+                            .apps
+                            .iter()
+                            .find(|app| &app.id == id)
+                            .or(face.as_ref())
                     {
                         rect.h -= 18.4 + caption_height(state, assets, app, rect.w);
                     }
@@ -3213,18 +3219,31 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str, anchor: Op
         })
     );
     let background = matches!(state.overlay, Some(Overlay::BackgroundOptions { .. }));
-    let app = state.inventory.apps.iter().find(|app| app.id == id);
-    let favorite = state
-        .preferences
-        .favorites(&state.inventory.apps)
+    let input = state.is_input(id);
+    let input_face = state.input_app(id);
+    let app = state
+        .inventory
+        .apps
         .iter()
-        .any(|item| item == id);
-    let deletable = if background {
+        .find(|app| app.id == id)
+        .or(input_face.as_ref());
+    let favorite = if input {
+        state.input_favorite(id)
+    } else {
+        state
+            .preferences
+            .favorites(&state.inventory.apps)
+            .iter()
+            .any(|item| item == id)
+    };
+    let deletable = if input {
+        false
+    } else if background {
         state.can_delete_background(id) && state.deleting_wallpaper.is_none()
     } else {
         crate::platform::can_uninstall(id)
     };
-    let height = if shortcut {
+    let height = if shortcut || input {
         176.
     } else if background {
         if deletable { 176. } else { 99.2 }
@@ -3280,6 +3299,19 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str, anchor: Op
             actions.push((Target::DeleteBackground, language.t("deleteBackground")));
         }
         actions
+    } else if input {
+        // Inputs are not installed apps: no hide or delete, only Home membership.
+        vec![
+            (Target::OpenApp, language.t("open")),
+            (
+                Target::Option(0),
+                language.t(if favorite {
+                    "removeFavorite"
+                } else {
+                    "addFavorite"
+                }),
+            ),
+        ]
     } else {
         vec![
             (Target::OpenApp, language.t("open")),
