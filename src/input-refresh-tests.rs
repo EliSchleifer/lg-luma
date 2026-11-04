@@ -441,3 +441,64 @@ fn input_cards_launch_but_cannot_be_reordered_or_opened_as_apps() {
     state.open(1);
     assert!(!state.apps().iter().any(|app| app.id == id));
 }
+
+#[test]
+fn apps_only_inputs_skip_home_and_list_on_the_apps_page_while_live() {
+    let mut state = ready();
+    // HDMI 2 is a soundbar: keep it off Home, but reachable from Apps.
+    let id = state.inventory.inputs[1].id.clone();
+    state.open(2);
+    state.section = WIDGETS_SECTION;
+    state.subpage = Some(Subpage::Inputs);
+    state.focus = Target::InputMode(id.clone());
+    state.activate();
+    assert_eq!(state.subpage, Some(Subpage::Input(id.clone())));
+    // "Apps only" is the fourth choice, after On, Off and Auto.
+    state.focus = Target::Choice(3);
+    state.activate();
+    assert_eq!(state.preferences.input_modes[&id], InputMode::Apps);
+
+    state.open(0);
+    assert!(!state.apps().iter().any(|app| app.id == id));
+    assert_eq!(
+        state.apps()[0].id,
+        state.inventory.inputs[0].id,
+        "other cards keep their slots"
+    );
+
+    state.open(1);
+    assert_eq!(
+        state.apps()[0].id,
+        id,
+        "live Apps-only inputs lead the All tab"
+    );
+    state.focus = Target::App(id.clone());
+    assert_eq!(
+        state.activate(),
+        vec![crate::state::Effect::Launch(id.clone())],
+        "an input on the Apps page opens the input instead of app options"
+    );
+    assert!(state.overlay.is_none());
+    // Category tabs list apps only; search matches the card title.
+    state.filter = 1;
+    assert!(!state.apps().iter().any(|app| app.id == id));
+    state.filter = 0;
+    state.query = "nothing like it".into();
+    assert!(!state.apps().iter().any(|app| app.id == id));
+    for query in ["hdmi 2", "apple"] {
+        state.query = query.into();
+        assert!(state.apps().iter().any(|app| app.id == id), "{query}");
+    }
+    state.query.clear();
+
+    // Switched off: it leaves the Apps page too.
+    let mut inputs = state.inventory.inputs.clone();
+    inputs[1].signal = Some(false);
+    state.set_inputs(inputs);
+    assert!(!state.apps().iter().any(|app| app.id == id));
+
+    // The mode survives a save/load round trip.
+    let saved = serde_json::to_string(&state.preferences).unwrap();
+    let loaded: Preferences = serde_json::from_str(&saved).unwrap();
+    assert_eq!(loaded.input_modes[&id], InputMode::Apps);
+}

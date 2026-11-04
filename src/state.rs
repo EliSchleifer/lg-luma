@@ -488,6 +488,23 @@ impl State {
                 .collect();
         }
         let query = self.query.to_lowercase();
+        // "Apps only" inputs lead the All tab (and search) while they are live, in port order.
+        let inputs: Vec<_> = self
+            .input_apps
+            .iter()
+            .filter(|app| {
+                self.filter == 0
+                    && self.inventory.inputs.iter().any(|input| {
+                        input.id == app.id
+                            && self.preferences.input_in_apps(input)
+                            // Search finds the card by its title or its port ("HDMI 2").
+                            && (input.port.to_lowercase().contains(&query)
+                                || self.input_app(&app.id).is_some_and(|face| {
+                                    face.title.to_lowercase().contains(&query)
+                                }))
+                    })
+            })
+            .collect();
         let mut apps: Vec<_> = self
             .inventory
             .apps
@@ -510,7 +527,7 @@ impl State {
                 .cmp(&rank(b))
                 .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
         });
-        apps
+        inputs.into_iter().chain(apps).collect()
     }
 
     /// A visible HDMI input by its app ID.
@@ -1208,6 +1225,7 @@ impl State {
                     ) => 2,
                     Some(Subpage::Language) => Language::ALL.len(),
                     Some(Subpage::DateFormat) => crate::model::DateFormat::ALL.len(),
+                    Some(Subpage::Input(_)) => 4,
                     _ => 3,
                 };
                 match direction {
@@ -1238,7 +1256,7 @@ impl State {
                         if self.focus == Target::InputNameReset {
                             Target::InputRename
                         } else {
-                            Target::Choice(2)
+                            Target::Choice(3)
                         },
                         controls,
                     ),
@@ -2004,7 +2022,11 @@ impl State {
                 self.pressed = None;
             }
             Target::TvSettings => return vec![Effect::Launch("com.palm.app.settings".into())],
-            Target::App(_) if self.page == Page::Apps && !self.launching => self.options(),
+            Target::App(id)
+                if self.page == Page::Apps && !self.launching && !self.is_input(&id) =>
+            {
+                self.options()
+            }
             Target::App(id) if !self.launching => {
                 return vec![Effect::Launch(id)];
             }
@@ -2317,6 +2339,7 @@ impl State {
                     InputMode::On => 0,
                     InputMode::Off => 1,
                     InputMode::Auto => 2,
+                    InputMode::Apps => 3,
                 });
             }
             Target::Choice(index) => {
@@ -2329,7 +2352,12 @@ impl State {
                     Some(Subpage::Input(id)) => {
                         self.preferences.input_modes.insert(
                             id,
-                            [InputMode::On, InputMode::Off, InputMode::Auto][index.min(2)],
+                            [
+                                InputMode::On,
+                                InputMode::Off,
+                                InputMode::Auto,
+                                InputMode::Apps,
+                            ][index.min(3)],
                         );
                     }
                     Some(Subpage::Temperature) => {
