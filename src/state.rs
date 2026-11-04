@@ -139,6 +139,7 @@ pub enum Overlay {
     SystemKeyboard,
     WallpaperUpload,
     TileEditor,
+    HomeAssistantSetup,
     BackgroundOptions { id: String, restore: Target },
     BackgroundDelete { id: String, restore: Target },
 }
@@ -242,6 +243,10 @@ pub struct State {
     pub deleting_wallpaper: Option<String>,
     pub wallpaper_upload: Option<Result<crate::wallpapers::Session, String>>,
     pub tile_editor: Option<Result<crate::companion::Session, String>>,
+    /// The HACS install link's QR code, made when its dialog opens.
+    pub home_assistant_qr: Option<Result<crate::companion::Session, String>>,
+    /// Where Home Assistant reaches this TV, once the listener is up.
+    pub home_assistant_address: Option<String>,
     /// Luma update (Settings → System), driven by the update worker.
     pub update: crate::update::InstallStatus,
     pub panel_started: Option<Instant>,
@@ -287,6 +292,8 @@ impl State {
             deleting_wallpaper: None,
             wallpaper_upload: None,
             tile_editor: None,
+            home_assistant_qr: None,
+            home_assistant_address: None,
             update: crate::update::InstallStatus::default(),
             panel_started: None,
             weather: weather::Weather::default(),
@@ -295,6 +302,16 @@ impl State {
             input_name: String::new(),
             recents: crate::recents::Recents::default(),
         }
+    }
+
+    /// The QR code that installs the Home Assistant integration through HACS.
+    pub fn open_home_assistant_setup(&mut self) {
+        self.home_assistant_qr = Some(crate::companion::qr(
+            crate::home_assistant::HACS_LINK.to_owned(),
+        ));
+        self.overlay = Some(Overlay::HomeAssistantSetup);
+        self.focus = Target::CloseDialog;
+        self.pressed = None;
     }
 
     pub fn notify(&mut self, text: impl Into<String>) {
@@ -1104,7 +1121,7 @@ impl State {
         }
         if matches!(
             self.overlay,
-            Some(Overlay::WallpaperUpload | Overlay::TileEditor)
+            Some(Overlay::WallpaperUpload | Overlay::TileEditor | Overlay::HomeAssistantSetup)
         ) {
             return vec![];
         }
@@ -1294,7 +1311,7 @@ impl State {
             }
             if matches!(
                 self.focus,
-                Target::Setting(0 | 1 | 4 | 7)
+                Target::Setting(0 | 1 | 4 | 7 | 9)
                     | Target::Widget(_)
                     | Target::InputMode(_)
                     | Target::WeatherLocation
@@ -2231,7 +2248,16 @@ impl State {
                         return vec![];
                     }
                     2 => self.preferences.reduced_motion = !self.preferences.reduced_motion,
-                    8 => self.preferences.home_assistant = !self.preferences.home_assistant,
+                    8 => {
+                        self.preferences.home_assistant = !self.preferences.home_assistant;
+                        if self.preferences.home_assistant {
+                            self.open_home_assistant_setup();
+                        }
+                    }
+                    9 => {
+                        self.open_home_assistant_setup();
+                        return vec![];
+                    }
                     4 => {
                         self.subpage = Some(Subpage::Language);
                         self.focus = Target::Choice(self.preferences.language.index());
@@ -2524,6 +2550,16 @@ impl State {
             if matches!(overlay, Overlay::WallpaperUpload) {
                 self.wallpaper_upload = None;
                 self.focus = Target::UploadWallpaper;
+                self.pressed = None;
+                return vec![];
+            }
+            if matches!(overlay, Overlay::HomeAssistantSetup) {
+                self.home_assistant_qr = None;
+                self.focus = Target::Setting(if self.preferences.home_assistant {
+                    9
+                } else {
+                    8
+                });
                 self.pressed = None;
                 return vec![];
             }

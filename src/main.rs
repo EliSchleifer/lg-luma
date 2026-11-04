@@ -719,9 +719,6 @@ fn run() -> Result<(), String> {
         Some(preferences_path.with_file_name("home-assistant.json")),
         home_assistant::PORT,
     );
-    // Show the address to pair with only after the setting is turned on, not at every launch.
-    let mut home_assistant_enabled = state.preferences.home_assistant;
-    let mut announce_home_assistant = false;
     let update_service = update::Service::new(public_update_checks);
     effects(
         vec![Effect::Refresh],
@@ -1206,18 +1203,15 @@ fn run() -> Result<(), String> {
                 }
             }
         }
-        if state.preferences.home_assistant != home_assistant_enabled {
-            home_assistant_enabled = state.preferences.home_assistant;
-            announce_home_assistant = home_assistant_enabled;
-        }
-        home_assistant.set_enabled(home_assistant_enabled);
+        home_assistant.set_enabled(state.preferences.home_assistant);
         while let Ok(event) = home_assistant.events.try_recv() {
             let language = state.preferences.language;
             let notice = match event {
-                home_assistant::Event::Listening(_) if !announce_home_assistant => continue,
+                // The setup dialog shows the address; no notice at every launch.
                 home_assistant::Event::Listening(address) => {
-                    announce_home_assistant = false;
-                    language.format("homeAssistantListening", &[("address", &address)])
+                    state.home_assistant_address = Some(address);
+                    state.dirty = true;
+                    continue;
                 }
                 home_assistant::Event::PairingCode(code) => {
                     language.format("homeAssistantCode", &[("code", &code)])

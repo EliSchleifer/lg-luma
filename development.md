@@ -430,6 +430,13 @@ ruff check . && ruff format --check .
 python -m pytest -p no:cacheprovider tests/home-assistant
 ```
 
+Turning the setting on opens a dialog (`Overlay::HomeAssistantSetup`) with a QR code for
+`HACS_LINK`, a My Home Assistant redirect that opens HACS on the owner's server with this
+repository's integration; it shows the listener's address once bound. While the setting is on,
+**Add to Home Assistant** (`Setting(9)`) reopens it, so seeing the code again never requires
+turning the setting off and forgetting pairings. The QR code uses the companion dialogs'
+inverted drawing (`view::qr_code`).
+
 Desktop builds serve the same API and print overlay launches and toasts instead of calling webOS.
 Verify overlay stacking, key focus, pausing and the overlay install on TV hardware.
 

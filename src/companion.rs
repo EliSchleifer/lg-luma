@@ -62,7 +62,11 @@ pub fn listen(loopback_only: bool) -> Result<TcpListener, String> {
 }
 
 pub fn session(address: SocketAddr, token: &str) -> Result<Session, String> {
-    let url = format!("http://{address}/{token}/");
+    qr(format!("http://{address}/{token}/"))
+}
+
+/// A QR code for any link, drawn like a companion session's.
+pub fn qr(url: String) -> Result<Session, String> {
     // Highest correction reserves capacity for the small branded center mark.
     let qr = qrcodegen::QrCode::encode_text(&url, qrcodegen::QrCodeEcc::High)
         .map_err(|e| e.to_string())?;
