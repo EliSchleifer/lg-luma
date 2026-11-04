@@ -960,7 +960,7 @@ fn overlay_bundle(f: &Fixture, version: &str) {
         &format!("{DIR}/overlay/appinfo.json"),
         json!({"id":overlay::OVERLAY,"version":version}),
     );
-    f.put(&format!("{DIR}/overlay/overlay.ipk"), b"ipk");
+    f.put(&format!("{DIR}/overlay/overlay.package"), b"ipk");
 }
 #[test]
 fn overlay_install_skips_the_current_version_and_waits_for_an_update() {
@@ -989,7 +989,12 @@ fn overlay_install_skips_the_current_version_and_waits_for_an_update() {
         .into_iter()
         .find(|c| c.contains("appInstallService/dev/install"))
         .unwrap();
-    assert!(install.contains("/overlay/overlay.ipk"), "{install}");
+    assert!(
+        install.contains(r#""ipkUrl":"/tmp/luma-overlay.ipk""#),
+        "{install}"
+    );
+    // The staged copy is removed once the install finished.
+    assert!(!f.p("/tmp/luma-overlay.ipk").exists());
     assert_eq!(f.pauses.get(), 2);
 }
 #[test]

@@ -398,7 +398,8 @@ close report, which must come from loopback with the session's random nonce.
 The overlay is a separate web app, `overlay/` (`com.ecklf.luma.overlay`), because only a web app's
 `appinfo.json` can ask for the transparent `defaultWindowType: overlay` window that keeps the
 foreground app running; SDL-webOS cannot set `_WEBOS_WINDOW_TYPE`. `tools/package.mjs` builds it
-as its own IPK with Luma's version and stages it in Luma's package as `overlay/overlay.ipk`
+as its own IPK with Luma's version and stages it in Luma's package as `overlay/overlay.package` (ares-package drops any path
+containing `.ipk` from an app; the helper copies it to `/tmp/luma-overlay.ipk` to install it)
 with its `appinfo.json`, which `tools/ipk.mjs` verifies. `luma-helper overlay install` (root, in
 process for a root Home) installs it via `appInstallService/dev/install` when the installed
 version differs. The page is plain script for webOS 4's Chromium 53; `overlay/logic.js` holds the

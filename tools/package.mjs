@@ -178,7 +178,8 @@ await fs.copyFile(path.join(out, 'assets/app-icon.png'), path.join(overlayStage,
 aresPackage(overlayStage, overlayDist);
 const overlayIpk = `${overlayInfo.id}_${overlayInfo.version}_all.ipk`;
 await fs.mkdir(path.join(stage, 'overlay'));
-await fs.copyFile(path.join(overlayDist, overlayIpk), path.join(stage, 'overlay/overlay.ipk'));
+// ares-package drops any path containing ".ipk" from an app, so the bundle uses another name.
+await fs.copyFile(path.join(overlayDist, overlayIpk), path.join(stage, 'overlay/overlay.package'));
 await fs.writeFile(
   path.join(stage, 'overlay/appinfo.json'),
   `${JSON.stringify(overlayInfo, null, 2)}\n`,

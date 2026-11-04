@@ -10,6 +10,10 @@ use std::path::Path;
 pub const OVERLAY: &str = "com.ecklf.luma.overlay";
 /// Inside Luma's installation; `tools/package.mjs` builds and stages both files.
 pub const BUNDLE: &str = "overlay";
+/// The overlay IPK inside Luma's package. ares-package drops any path containing ".ipk" from an
+/// app, so it is stored under another name and copied to an `.ipk` path to install.
+pub const PACKAGE: &str = "overlay.package";
+const STAGED: &str = "/tmp/luma-overlay.ipk";
 
 /// webOS media IDs are short opaque tokens such as `_3FzD9vJx1k2abc`.
 pub fn valid_media_id(id: &str) -> bool {
@@ -47,24 +51,31 @@ fn install(system: &impl System, directory: &Path) -> Result<Value> {
     if installed_version(system)?.as_deref() == Some(expected.as_str()) {
         return Ok(json!({"returnValue":true,"version":expected,"changed":false}));
     }
-    let ipk = bundle.join("overlay.ipk");
-    if !system::exists(system, &ipk) {
+    let package = bundle.join(PACKAGE);
+    if !system::exists(system, &package) {
         return Err("The Luma package does not include the overlay app".into());
     }
-    accepted(system::luna(
-        system,
-        "com.webos.appInstallService",
-        "dev/install",
-        &json!({"id": OVERLAY, "ipkUrl": ipk, "subscribe": false}),
-    )?)?;
-    // dev/install answers before installing; the app manager lists the result once done.
-    for _ in 0..60 {
-        system.pause();
-        if installed_version(system)?.as_deref() == Some(expected.as_str()) {
-            return Ok(json!({"returnValue":true,"version":expected,"changed":true}));
+    let bytes = system::read(system, &package, 16 * 1024 * 1024)?;
+    system::mkdir(system, "/tmp")?;
+    system::write(system, STAGED, &bytes, 0o644)?;
+    let result = (|| {
+        accepted(system::luna(
+            system,
+            "com.webos.appInstallService",
+            "dev/install",
+            &json!({"id": OVERLAY, "ipkUrl": STAGED, "subscribe": false}),
+        )?)?;
+        // dev/install answers before installing; the app manager lists the result once done.
+        for _ in 0..60 {
+            system.pause();
+            if installed_version(system)?.as_deref() == Some(expected.as_str()) {
+                return Ok(json!({"returnValue":true,"version":expected,"changed":true}));
+            }
         }
-    }
-    Err("The overlay app was not installed within a minute".into())
+        Err("The overlay app was not installed within a minute".into())
+    })();
+    let _ = system::remove(system, STAGED);
+    result
 }
 
 fn close(system: &impl System) -> Result<Value> {
