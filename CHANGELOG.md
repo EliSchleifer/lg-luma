@@ -1,5 +1,11 @@
 # lg-luma
 
+## 2.19.0
+
+### Minor Changes
+
+- 1849b66: Add Home Assistant camera overlays: turn on Settings → General → Home Assistant, scan the QR code to install the `luma` integration through HACS, pair it with the code shown on the TV, and show a camera, such as a doorbell, in a corner over whatever is playing, optionally pausing it until the overlay closes. Home Assistant can also show notification toasts.
+
 ## 2.18.0
 
 ### Minor Changes
