@@ -1949,21 +1949,6 @@
     "nl": "Apps verplaatsen",
     "sv": "Flytta appar"
   },
-  "inputsHeading": {
-    "zh-tw": "輸入來源",
-    "en": "Inputs",
-    "de": "Eingänge",
-    "es": "Entradas",
-    "zh": "输入源",
-    "pt": "Entradas",
-    "it": "Ingressi",
-    "ru": "Входы",
-    "pl": "Wejścia",
-    "fr": "Entrées",
-    "vi": "Đầu vào",
-    "nl": "Ingangen",
-    "sv": "Ingångar"
-  },
   "noInputs": {
     "zh-tw": "沒有可用的輸入來源。",
     "en": "No inputs to show.",

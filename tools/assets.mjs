@@ -137,6 +137,11 @@ const surfaces = {
   kodi: ['#0a749b', '#08445e'],
   moonlight: ['#435d8f', '#252e59'],
   gaming: ['#435d8f', '#252e59'],
+  // HDMI inputs on Home. A recognized console's card uses its official brand colour.
+  input: ['#3d4652', '#1c2229'],
+  'input-xbox': ['#107c10', '#107c10'],
+  'input-switch': ['#e60012', '#e60012'],
+  'input-playstation': ['#003791', '#003791'],
   browser: ['#192a43', '#0d1628'],
   'hbo-max': ['#181818', '#080808'],
   'paramount-plus': ['#075bda', '#00298e'],

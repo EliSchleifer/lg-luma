@@ -3,7 +3,7 @@
 //! process trying to impersonate its application identity.
 use crate::{
     app_artwork,
-    model::{App, Input, Inventory, demo_inventory, valid_app_id},
+    model::{App, Console, Input, Inventory, demo_inventory, valid_app_id},
 };
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::mpsc, thread};
@@ -695,7 +695,9 @@ pub fn read_app_icons(source: &app_artwork::Source) -> Result<Vec<Vec<u8>>, Stri
             }
             remaining -= hex.len() / 2;
             hex.as_bytes()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| {
                     let digit = |b: u8| {
                         (b as char)
@@ -883,6 +885,54 @@ pub fn normalize_apps(raw: &Value) -> Result<Vec<App>, String> {
     Ok(apps)
 }
 
+/// Fields in which webOS firmware reports what an HDMI source says about itself: the SPD
+/// InfoFrame vendor/product and the HDMI-CEC OSD name. They come first; the TV's own label
+/// (which the TV may also set from them) and any other short string values follow, because
+/// field names vary between firmware versions.
+const DEVICE_FIELDS: [&str; 9] = [
+    "spdProductDescription",
+    "spdVendorName",
+    "spdSourceDeviceInfo",
+    "cecDeviceName",
+    "cecOsdName",
+    "osdName",
+    "deviceName",
+    "deviceType",
+    "label",
+];
+
+pub fn reported_console(entry: &Value) -> Option<Console> {
+    fn strings<'a>(value: &'a Value, depth: u8, out: &mut Vec<&'a str>) {
+        match value {
+            Value::String(text) if text.len() <= 120 => out.push(text),
+            Value::Object(map) if depth > 0 => {
+                for value in map.values() {
+                    strings(value, depth - 1, out);
+                }
+            }
+            Value::Array(items) if depth > 0 => {
+                for value in items.iter().take(16) {
+                    strings(value, depth - 1, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let object = entry.as_object()?;
+    let mut texts = vec![];
+    for key in DEVICE_FIELDS {
+        if let Some(value) = object.get(key) {
+            strings(value, 1, &mut texts);
+        }
+    }
+    for (key, value) in object {
+        if !DEVICE_FIELDS.contains(&key.as_str()) && key != "appId" && key != "id" {
+            strings(value, 1, &mut texts);
+        }
+    }
+    texts.into_iter().find_map(Console::detect)
+}
+
 pub fn normalize_inputs(raw: &Value) -> Result<Vec<Input>, String> {
     let entries = raw
         .as_array()
@@ -927,6 +977,7 @@ pub fn normalize_inputs(raw: &Value) -> Result<Vec<Input>, String> {
             title: title(entry.get("label").and_then(Value::as_str), &port),
             port,
             signal: entry.get("hdmiSignalExist").and_then(Value::as_bool),
+            device: reported_console(entry),
             // Some firmware reports `connected: true` for every existing port;
             // `hdmiPlugIn` is the actual cable state where it is provided.
             connected: entry

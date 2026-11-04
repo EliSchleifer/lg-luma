@@ -1,0 +1,157 @@
+name: Release
+run-name: 'Release Luma (${{ inputs.bump }})'
+
+# The only way to publish Luma. Run it from Actions → Release → Run workflow on main:
+#   1. Bump the version (pending changesets and/or the chosen bump) on a release/vX.Y.Z branch.
+#   2. Run the full CI validation (checks, smoke suites, verified ARM IPK) on that commit.
+#   3. Fast-forward main to the release commit, publish the GitHub release, mirror it to R2.
+# If any step before 3 fails, main and the published feed are untouched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: >-
+          Version bump. "changesets" uses the pending .changeset notes; patch/minor/major add
+          that bump on top of any pending notes (the highest bump wins).
+        type: choice
+        options: [changesets, patch, minor, major]
+        default: patch
+      notes:
+        description: Changelog line for a patch/minor/major release (optional)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-app
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Bump version
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+      tag: ${{ steps.commit.outputs.tag }}
+      base: ${{ steps.commit.outputs.base }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Apply the version bump
+        env:
+          BUMP: ${{ inputs.bump }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          pending="$(find .changeset -maxdepth 1 -name '*.md' ! -name README.md | wc -l)"
+          if [ "$BUMP" = changesets ]; then
+            if [ "$pending" -eq 0 ]; then
+              echo '::error::No pending changesets. Choose patch, minor or major instead.'
+              exit 1
+            fi
+          else
+            {
+              printf -- "---\n'lg-luma': %s\n---\n\n" "$BUMP"
+              printf '%s\n' "${NOTES:-Release.}"
+            } > ".changeset/release-$GITHUB_RUN_ID.md"
+          fi
+          pnpm version:release
+          pnpm version:check
+      - name: Commit to a release branch
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          tag="v$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "::error::Tag $tag already exists."
+            exit 1
+          fi
+          base="$(git rev-parse HEAD)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m "Release $tag"
+          git push --force origin "HEAD:refs/heads/release/$tag"
+          {
+            echo "sha=$(git rev-parse HEAD)"
+            echo "tag=$tag"
+            echo "base=$base"
+          } >> "$GITHUB_OUTPUT"
+          echo "### Releasing $tag" >> "$GITHUB_STEP_SUMMARY"
+
+  validate:
+    name: Validate
+    needs: version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.version.outputs.sha }}
+
+  publish:
+    name: Publish GitHub release
+    needs: [version, validate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      statuses: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: luma-release
+          path: release
+      - name: Fast-forward main and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+          SHA: ${{ needs.version.outputs.sha }}
+          BASE: ${{ needs.version.outputs.base }}
+        run: |
+          packaged="$(basename release/*_arm.ipk)"
+          if [[ "$packaged" != *"_${TAG#v}_arm.ipk" ]]; then
+            printf 'Packaged %s does not match %s\n' "$packaged" "$TAG" >&2
+            exit 1
+          fi
+          main="$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)"
+          if [ "$main" != "$BASE" ] && [ "$main" != "$SHA" ]; then
+            echo "::error::main moved during the release ($BASE → $main). Run Release again."
+            exit 1
+          fi
+          # The validate job ran the full CI on this exact commit; record that under the check
+          # name the main-branch ruleset requires so the fast-forward is accepted.
+          gh api "repos/$GH_REPO/statuses/$SHA" -f state=success \
+            -f context='Rust checks, rendering, and native package' \
+            -f description="Validated by Release run $GITHUB_RUN_ID" \
+            -f target_url="$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null
+          # Not forced: GitHub rejects anything but a fast-forward.
+          gh api -X PATCH "repos/$GH_REPO/git/refs/heads/main" -f sha="$SHA" -F force=false > /dev/null
+          gh release create "$TAG" release/*.ipk release/sha256sums release/repo.json \
+            release/description.html release/app-icon-large.png \
+            --target "$SHA" --generate-notes --title "Luma ${TAG#v}"
+          gh api -X DELETE "repos/$GH_REPO/git/refs/heads/release/$TAG" || true
+          echo "### Published [$TAG]($GITHUB_SERVER_URL/$GH_REPO/releases/tag/$TAG)" >> "$GITHUB_STEP_SUMMARY"
+
+  mirror:
+    name: Publish to Cloudflare R2
+    needs: [version, publish]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/publish-r2.yml
+    secrets: inherit
+    with:
+      tag: ${{ needs.version.outputs.tag }}

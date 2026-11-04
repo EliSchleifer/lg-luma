@@ -1,7 +1,7 @@
 //! Screen geometry and styling mirror the web UI's 1920×1080 / 16px-rem layout.
 use crate::{
     i18n::Language,
-    model::{App, BACKGROUNDS, CATEGORIES, Input, InputMode},
+    model::{App, BACKGROUNDS, CATEGORIES, Console, Input, InputMode},
     renderer::{Color, Draw, TextStyle, WHITE},
     state::{
         APPS_COLUMNS, Control, HOME_FADE_LEFT, HOME_FADE_RIGHT, HOME_STRIP_LEFT, HOME_STRIP_RIGHT,
@@ -787,6 +787,10 @@ fn tile(
     names: bool,
     pinned: bool,
 ) {
+    let input_face = (state.page == Page::Home)
+        .then(|| state.input_app(&app.id))
+        .flatten();
+    let app = input_face.as_ref().unwrap_or(app);
     let caption_height = if names {
         caption_height(state, assets, app, rect.w)
     } else {
@@ -825,6 +829,11 @@ fn tile(
         if focused { 0.4 } else { 0.165 },
     );
     let favorite_color = app_face(out, assets, app, rect, state.preferences.language, 19.2);
+    if input_face.is_some()
+        && let Some(input) = state.inventory.inputs.iter().find(|i| i.id == app.id)
+    {
+        input_badge(out, state, input, rect);
+    }
     if pinned {
         favorite_badge(out, assets, rect, favorite_color);
     }
@@ -887,6 +896,26 @@ fn tile(
     if state.moving.is_some() && state.moving.as_ref() != Some(&app.id) {
         out.fade(start, 0.48, 1.);
     }
+}
+
+/// The port in the card's corner ("HDMI 1"), with "No signal" while the source sleeps.
+fn input_badge(out: &mut Scene, state: &State, input: &Input, card: Rect) {
+    let label = if input.connected == Some(true) && input.signal == Some(false) {
+        format!(
+            "{} · {}",
+            input.port,
+            state.preferences.language.t("noSignal")
+        )
+    } else {
+        input.port.clone()
+    };
+    out.text(
+        label,
+        Rect::new(card.x + 18.4, card.y + 14.4, card.w - 36.8, 22.),
+        text(15.2, 600, 0.04),
+        c(0xffffff, 0.66),
+        false,
+    );
 }
 
 fn favorite_badge(out: &mut Scene, assets: &Assets, card: Rect, color: Color) {
@@ -1043,6 +1072,7 @@ fn brand_mark(out: &mut Scene, assets: &Assets, app: &App, rect: Rect, language:
                 "moonlight" => ("moonlight", "Moonlight"),
                 "gaming" => ("gaming", app.title.as_str()),
                 "custom" => (app.mark, app.title.as_str()),
+                brand if brand.starts_with("input") => (app.mark, app.title.as_str()),
                 _ => ("generic", app.title.as_str()),
             };
             let font = if brand == "generic" {
@@ -1160,7 +1190,6 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     }
     let apps = state.apps();
     let names = state.preferences.show_home_names;
-    let mut grid_height = FACE_HEIGHT;
     if state.loading && state.inventory.apps.is_empty() {
         for index in 0..6 {
             out.shape(
@@ -1196,18 +1225,6 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
                 action: Some(if error { Target::Retry } else { Target::Browse }),
             },
         );
-        grid_height = 247.5;
-    }
-    if !apps.is_empty() {
-        grid_height = FACE_HEIGHT
-            + if names {
-                18.4 + apps
-                    .iter()
-                    .map(|app| caption_height(state, assets, app, HOME_TILE_WIDTH))
-                    .fold(58.24, f32::max)
-            } else {
-                0.
-            };
     }
     // Like Apple TV's rows, the favourites run to the screen edge: the next tile shows cut off
     // at the right (and a scrolled-away one at the left), so it is clear the row continues.
@@ -1243,97 +1260,6 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     }
     out.draw.push(Draw::EdgeFadeX(None));
     out.draw.push(Draw::Clip(Some(state.content_viewport())));
-    let input_y = 544.8 + grid_height + 41.6 - s;
-    let inputs: Vec<_> = state
-        .inventory
-        .inputs
-        .iter()
-        .filter(|input| state.preferences.input_visible(input))
-        .collect();
-    if !inputs.is_empty() {
-        out.text(
-            language.t("inputsHeading"),
-            Rect::new(84., input_y + 3.3, 1000., 31.),
-            text(23.2, 550, -0.035).leading(1.3),
-            WHITE,
-            false,
-        );
-    }
-    for (index, input) in inputs.iter().enumerate() {
-        let rect = Rect::new(
-            84. + (index % 3) as f32 * 591.45,
-            input_y + 58.4 + (index / 3) as f32 * 126.4,
-            569.1,
-            104.,
-        );
-        let focused = state.focus == Target::Input(input.id.clone());
-        out.shadow(
-            rect,
-            18.4,
-            if focused { 34. } else { 4. },
-            if focused { 14. } else { 1. },
-            if focused { 0.4 } else { 0.01 },
-        );
-        out.draw.push(Draw::RoundedGradient(
-            rect,
-            18.4,
-            if focused {
-                c(0x30363c, 0.70)
-            } else {
-                c(0x20252b, 0.60)
-            },
-            if focused {
-                c(0x242a30, 0.65)
-            } else {
-                c(0x171c22, 0.55)
-            },
-        ));
-        out.border(
-            rect,
-            18.4,
-            1.,
-            c(0xffffff, if focused { 0.24 } else { 0.063 }),
-        );
-        let art = Rect::new(rect.x + 21., rect.y + 24., 56., 56.);
-        out.draw.push(Draw::RoundedGradient(
-            art,
-            12.8,
-            c(0xd6d6d6, 0.24),
-            c(0xa0a0a0, 0.10),
-        ));
-        let name = state.preferences.input_name(input);
-        let icon = input_icon(input, name);
-        let size = if icon == "apple-tv" { 41.6 } else { 35.2 };
-        out.icon(
-            assets,
-            &format!("input-{icon}"),
-            Rect::new(
-                art.x + (56. - size) / 2.,
-                art.y + (56. - size) / 2.,
-                size,
-                size,
-            ),
-            c(0xdedede, 1.),
-        );
-        out.text(
-            state.preferences.input_title(input),
-            Rect::new(rect.x + 93., rect.y + 24.3, 450., 28.8),
-            text(24., 500, -0.03),
-            WHITE,
-            false,
-        );
-        out.text(
-            input_status(input, name.is_some(), language),
-            Rect::new(rect.x + 93., rect.y + 57.4, 450., 25.2),
-            text(16.8, 400, 0.).leading(1.5),
-            c(0xe8e8e8, 0.48),
-            false,
-        );
-        if focused {
-            out.ring(rect, 18.4);
-        }
-        out.control(Target::Input(input.id.clone()), rect, true);
-    }
 }
 
 struct WeatherSummary {
@@ -2680,7 +2606,11 @@ fn inputs_settings(out: &mut Scene, state: &State, assets: &Assets) {
                 title: state.preferences.input_title(input),
                 icon: Some(&format!(
                     "input-{}",
-                    input_icon(input, state.preferences.input_name(input))
+                    input_icon(
+                        input,
+                        state.preferences.input_name(input),
+                        state.preferences.input_device(input),
+                    )
                 )),
                 value: Some(language.t(match mode {
                     InputMode::On => "stateOn",
@@ -3033,12 +2963,33 @@ fn shorten(text: &str) -> String {
     }
 }
 
-/// A custom name such as "PS5" can choose the icon; otherwise the TV's label.
-fn input_icon(input: &Input, custom: Option<&str>) -> &'static str {
+/// A custom name such as "PS5" can choose the icon; then the console the input reports;
+/// otherwise the TV's label.
+fn input_icon(input: &Input, custom: Option<&str>, device: Option<Console>) -> &'static str {
     custom
         .map(device_icon)
         .filter(|icon| *icon != "hdmi")
+        .or(device.map(Console::icon))
         .unwrap_or_else(|| device_icon(&input.title))
+}
+
+/// The interface icon name (as loaded by `Scene::icon`) for an input's Home card.
+pub fn input_icon_name(
+    input: &Input,
+    custom: Option<&str>,
+    device: Option<Console>,
+) -> &'static str {
+    match input_icon(input, custom, device) {
+        "playstation" => "input-playstation",
+        "xbox" => "input-xbox",
+        "nintendo-switch" => "input-nintendo-switch",
+        "apple-tv" => "input-apple-tv",
+        "usb" => "input-usb",
+        "console" => "input-console",
+        "computer" => "input-computer",
+        "streamer" => "input-streamer",
+        _ => "input-hdmi",
+    }
 }
 
 fn device_icon(name: &str) -> &'static str {
@@ -3050,10 +3001,11 @@ fn device_icon(name: &str) -> &'static str {
         "apple-tv"
     } else if name.contains("usb") {
         "usb"
-    } else if ["xbox", "switch", "console"]
-        .iter()
-        .any(|part| name.contains(part))
-    {
+    } else if name.contains("xbox") {
+        "xbox"
+    } else if name.contains("nintendo") || name == "switch" {
+        "nintendo-switch"
+    } else if ["switch", "console"].iter().any(|part| name.contains(part)) {
         "console"
     } else if ["pc", "computer", "laptop"]
         .iter()
@@ -3871,7 +3823,7 @@ mod tests {
                 for control in original
                     .controls
                     .iter()
-                    .filter(|control| matches!(control.target, Target::App(_) | Target::Input(_)))
+                    .filter(|control| matches!(control.target, Target::App(_)))
                 {
                     let other = rendered
                         .controls

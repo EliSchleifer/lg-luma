@@ -1,11 +1,20 @@
 name: CI
-run-name: "${{ github.event_name == 'push' && format('Main validation and release eligibility · {0}', github.event.head_commit.message) || github.event_name == 'workflow_dispatch' && format('Version/branch validation · {0} (no publication)', github.ref_name) || format('PR #{0} · {1}', github.event.pull_request.number, github.event.pull_request.title) }}"
+run-name: "${{ github.event_name == 'workflow_dispatch' && format('Branch validation · {0}', github.ref_name) || github.event_name == 'merge_group' && 'Merge queue validation' || format('PR #{0} · {1}', github.event.pull_request.number, github.event.pull_request.title) }}"
 
+# Validation only, and the merge gate: require "Rust checks, rendering, and native package" in the
+# main branch ruleset so a PR cannot merge unless this passes. There is no post-merge run on main;
+# release.yml calls this workflow again on the exact commit it publishes. merge_group lets the same
+# check gate a merge queue if the repository moves to an organization (queues are org-only).
 on:
-  push:
-    branches: [main]
   pull_request:
+  merge_group:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to validate
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -15,45 +24,14 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  release-gate:
-    name: Release eligibility
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      publish: ${{ steps.gate.outputs.result }}
-      tag: ${{ steps.version.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Identify app version
-        id: version
-        run: |
-          echo "tag=v$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
-      - name: Require a merged Changesets PR and a version increase
-        id: gate
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const { isReleaseMerge } = await import(`${process.env.GITHUB_WORKSPACE}/tools/release-gate.mjs`);
-            const publish = await isReleaseMerge({ github, context });
-            await core.summary
-              .addHeading(`Luma ${process.env.RELEASE_TAG}`)
-              .addRaw(publish
-                ? 'Release authorized: this main commit merged Version Packages with a version increase. Publication waits for checks, all four smoke suites, and the verified ARM package.'
-                : 'Validation only: this run cannot publish. Merge the Version Packages PR to start the eligible main-commit release run.')
-              .write();
-            return publish;
-        env:
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-
   prepare:
     name: Checks, unit tests, and shared desktop assets
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -61,7 +39,7 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
       - name: Cache Rust dependencies
@@ -116,6 +94,8 @@ jobs:
             artifact: translations
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -157,13 +137,15 @@ jobs:
       tag: ${{ steps.package.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: armv7-unknown-linux-gnueabi
       - uses: Swatinem/rust-cache@v2
@@ -218,100 +200,25 @@ jobs:
           }
           NODE
 
-  release:
-    name: Publish release and Homebrew feed
-    if: needs.release-gate.outputs.publish == 'true' && needs.build.result == 'success'
-    needs: [build, package, release-gate]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: luma-release
-          path: release
-      - name: Publish tested release files
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.package.outputs.tag }}
-          COMMIT_SHA: ${{ github.sha }}
-        run: |
-          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            printf 'Invalid release version: %s\n' "$RELEASE_TAG" >&2
-            exit 1
-          fi
-
-          state="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
-            --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .draft")"
-          if [ "$state" = false ]; then
-            printf 'Release %s is already published; skipping.\n' "$RELEASE_TAG"
-            echo "### Already published: [$RELEASE_TAG]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG)" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          existing_tag="$(gh api "repos/$GH_REPO/git/matching-refs/tags/$RELEASE_TAG" \
-            --jq ".[] | select(.ref == \"refs/tags/$RELEASE_TAG\") | .ref")"
-          if [ -n "$existing_tag" ]; then
-            tagged_commit="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq '.sha')"
-            if [ "$tagged_commit" != "$COMMIT_SHA" ]; then
-              printf 'Tag %s points to another commit; use a new app version.\n' "$RELEASE_TAG" >&2
-              exit 1
-            fi
-          fi
-
-          files=(release/*.ipk release/sha256sums release/repo.json release/description.html release/app-icon-large.png)
-          if [ "$state" = true ]; then
-            gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
-            gh release edit "$RELEASE_TAG" --draft=false
-          else
-            gh release create "$RELEASE_TAG" "${files[@]}" \
-              --target "$COMMIT_SHA" \
-              --generate-notes \
-              --title "Luma ${RELEASE_TAG#v}"
-          fi
-          echo "### Published [$RELEASE_TAG]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG)" >> "$GITHUB_STEP_SUMMARY"
-
-  mirror:
-    name: Publish to Cloudflare R2
-    needs: [release, package]
-    if: needs.release.result == 'success'
-    permissions:
-      contents: read
-    uses: ./.github/workflows/publish-r2.yml
-    secrets: inherit
-    with:
-      tag: ${{ needs.package.outputs.tag }}
-
   summary:
-    name: Release rollout summary
+    name: Validation summary
     if: always()
-    needs: [release-gate, prepare, smoke, package, build, release, mirror]
+    needs: [prepare, smoke, package, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Summarize validation and publication
+      - name: Summarize validation
         env:
           RESULTS: ${{ toJSON(needs) }}
-          RELEASE_TAG: ${{ needs.release-gate.outputs.tag }}
-          PUBLISH: ${{ needs.release-gate.outputs.publish }}
+          RELEASE_TAG: ${{ needs.package.outputs.tag }}
         run: |
           node <<'NODE'
           const fs = require('node:fs');
           const jobs = JSON.parse(process.env.RESULTS);
-          const repo = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}`;
-          const eligible = process.env.PUBLISH === 'true';
-          const gateFailed = jobs['release-gate'].result !== 'success';
-          const status = eligible
-            ? jobs.release.result === 'success' ? 'Publication job succeeded' : 'Release not published by this run'
-            : gateFailed ? 'Release eligibility could not be determined. Publication is blocked.' : 'Validation only, no publication authorized';
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
-            `## Luma ${process.env.RELEASE_TAG} rollout`, '', status, '',
+            `## Luma ${process.env.RELEASE_TAG || ''} validation`, '',
             '| Stage | Result |', '| --- | --- |',
             ...Object.entries(jobs).map(([name, job]) => `| ${name} | ${job.result} |`), '',
-            `[Run and artifacts](${repo}/actions/runs/${process.env.GITHUB_RUN_ID})`, '',
-            eligible ? `[Release page](${repo}/releases/tag/${process.env.RELEASE_TAG})` : 'Merge Version Packages to main to start the release run.', '',
-            eligible && jobs.release.result !== 'success' ? 'Retry failed jobs on this original main-commit run after resolving failures. Manual dispatch does not publish.' : '',
+            'Validation only. Run the **Release** workflow to publish.', '',
           ].join('\n'));
           NODE

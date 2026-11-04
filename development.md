@@ -32,7 +32,7 @@ pnpm assets
 pnpm dev
 ```
 
-The flake supplies Rust 1.93, Cargo/rustfmt/Clippy, Node.js 24, pnpm 10.34.5, SDL2, pkg-config,
+The flake supplies Rust 1.99.1, Cargo/rustfmt/Clippy, Node.js 24, pnpm 10.34.5, SDL2, pkg-config,
 woff2, Python/fontTools, CMake and Git. Linux includes Mesa and Xvfb. Supported Nix hosts are
 Apple Silicon macOS and ARM64/x86-64 Linux. Without Nix, supply those tools and Rust 1.88+,
 including `armv7-unknown-linux-gnueabi` for TV builds. No browser installation is needed.
@@ -164,8 +164,7 @@ also uses **Clear name**.
 Choice checkmarks identify saved values, while the bright row fill identifies only the current focus.
 
 Home favorites form one horizontal strip, never a second row. Left/Right follows saved order,
-including reorder mode, and reveals complete cards. Up returns to Home navigation; Down enters
-the nearest input in the first row. The strip position survives page changes. Wheel movement over
+including reorder mode, and reveals complete cards. Up returns to Home navigation. The strip position survives page changes. Wheel movement over
 favorites scrolls horizontally; elsewhere it scrolls vertically. Pointer hover/down never moves
 the clicked control. Apps Up/Down follows the six-column grid order, including offscreen rows,
 and only the first row's Up route reaches the category toolbar. Scrolling Apps content fades into
@@ -180,11 +179,26 @@ preferences are not reloaded. At most one input read is queued, errors retain th
 and retry after ten seconds, and an unchanged snapshot does not redraw. Holds, reordering, overlays,
 loading and hidden/unfocused pages pause polling and defer pending snapshots, keeping pointer
 targets stationary through release. A later complete inventory supersedes deferred input data.
-Auto visibility remains cable-based: boolean `hdmiPlugIn` takes priority over `connected`, with
-the existing fallback when unavailable or malformed. Optional boolean `hdmiSignalExist` changes
-only the detail to **No signal** when a cable is present. A stale positive signal cannot override
-an unplugged cable. A powered dongle stays visible in Auto even without signal; On/Off overrides
-and older firmware without signal information retain their behavior.
+The cable state comes from boolean `hdmiPlugIn`, which takes priority over `connected`, with
+the existing fallback when unavailable or malformed. Auto shows an input's Home card only while
+the cable is present and the TV does not report `hdmiSignalExist: false`, so a console that is
+unplugged or switched off takes no slot and the cards after it close the gap. A stale positive
+signal cannot override an unplugged cable. Firmware without signal information falls back to the
+cable state. **On** keeps the card (with **No signal** in its corner) and **Off** hides it.
+
+Visible HDMI inputs are cards at the far left of the Home favorites strip, ordered by port, rather
+than a separate row. They launch like apps but are not favorites: they cannot be reordered, hidden
+from Apps or opened in app options, and they do not appear on the Apps page. Visibility and names
+stay in **Settings → Widgets → Inputs**. Each card shows its port in the corner. A recognized console gives the card its name, brand mark and official
+colour: Xbox (#107C10), Nintendo Switch (#E60012) or PlayStation (#003791). Recognition reads what the source reports
+about itself in `getAllInputStatus`: the HDMI SPD InfoFrame vendor/product and CEC OSD name fields
+first (`spdVendorName`, `spdProductDescription`, `cecDeviceName`, `osdName`, `deviceName`, …),
+then the TV's label and other short string values, since field names vary between firmware
+versions. Video frames are never sampled. The last console seen on each port is saved in
+`input_devices`, so a console keeps its identity when its card returns; on a shared port (an Xbox and a Switch on
+one HDMI switch or cable) the card follows whichever console reports itself next. A custom input
+name replaces the title, and a name such as "Switch" also picks the colour. Which fields a given
+TV firmware fills has not been verified on hardware.
 
 System text events update app/location queries; Done/Back stops editing and restores focus.
 
@@ -971,8 +985,8 @@ The ARM package job runs alongside these suites using the shared assets, cross-l
 pinned Linux SDK, inspects/normalizes the actual IPK and generates checksums/feed. The existing
 **Rust checks, rendering, and native package** check remains as an aggregate that requires every
 preparation, smoke and package job to succeed. It uploads release/rendering artifacts on PRs,
-main-branch pushes and manual runs. `pnpm check` also validates synchronized release versions,
-and `pnpm test:release` covers version synchronization and the publish gate, including the real
+manual runs and Release runs. CI does not run again after a merge: PRs are the gate. `pnpm check` also validates synchronized release versions,
+and `pnpm test:release` covers version synchronization, the R2 feed mirror and the real
 Changesets version command in an isolated fixture. Host CI cannot prove hardware compatibility,
 small-text quality or presentation frame rate.
 
@@ -1015,44 +1029,59 @@ changeset will not request an app version bump. For code or behavior changes, ad
 using semantic versioning: **patch** for backward-compatible fixes, **minor** for backward-compatible
 features, or **major** for breaking changes. The comment is informational, so documentation-only
 and maintenance PRs can still merge without a release changeset. It updates when a PR is opened,
-reopened, edited, marked ready or receives new commits, and skips the generated Version Packages
-PR. The workflow becomes active once it is merged into the PR's base branch. It uses
+reopened, edited, marked ready or receives new commits. The workflow becomes active once it is merged into the PR's base branch. It uses
 `pull_request_target` with a read-only status job and a separate comment-writing job, without
 installing dependencies or running code from the PR.
 
-After changesets merge into `main`, `.github/workflows/release-pr.yml` creates or updates the
-**Version Packages** PR on `changeset-release/main`. Changesets combines the pending notes using
-the highest requested bump. The custom `pnpm version:release` command updates `package.json`
-and `CHANGELOG.md`, then synchronizes `appinfo.json`, the root `Cargo.toml`, the `luma` entry in
-`Cargo.lock`, and the versioned IPK examples in `readme.md`. Dependency pins and supporting Rust
-crate versions are preserved. The package stays private and is never published to npm.
+Merging never publishes. Changesets wait in `.changeset/` until the next release.
 
-The generated PR receives the same CI build as ordinary PRs. Since PRs created with GitHub's
-built-in token do not trigger `pull_request` workflows, the release workflow explicitly dispatches
-`ci.yml` for the version branch. Enable **Settings → Actions → General → Allow GitHub Actions to
-create and approve pull requests** in the repository. No additional token or npm secret is needed.
+### Merge gate
 
-Review and merge the version PR when ready to release. Only a main-branch push associated with
-that merged, same-repository PR and a numeric version increase can enter the publish job. It must
-also pass the existing checks, desktop smoke tests and native packaging build. Ordinary merges,
-unmerged PRs and manual CI runs do not publish. To retry a failed publication, rerun the original
-CI run for the merged version PR's main-branch commit.
+CI runs on pull requests (and manual dispatch), not after merging. Protect `main` so nothing lands
+untested: **Settings → Rules → Rulesets → New ruleset → New branch ruleset**, enforcement
+**Active**, target **Include default branch**, then enable:
 
-The Actions graph now shows **Release eligibility → shared preparation → four parallel smoke
-suites + ARM package → aggregate validation → Publish release and Homebrew feed**. Eligibility
-runs on PRs and manual dispatches too, explicitly reporting validation-only rather than leaving
-a skipped job to interpret. The **Release rollout summary** runs even when earlier jobs fail,
-listing stage results, the run/artifact link, release eligibility and retry instructions.
-The Release PR workflow also links the generated Version Packages PR and explains the rollout
-in its summary and PR body. A version-branch dispatch validates only, while the main push after
-merging is the publication candidate. Shared assets and release artifacts are always from that
-same workflow run and commit, never from a previous PR build.
+- **Require status checks to pass** with **Require branches to be up to date before merging**,
+  adding the check **Rust checks, rendering, and native package**. "Up to date" means a PR is
+  re-tested against the current `main` before it can merge, so CI results are never stale.
+  (Merge queues do the same with less waiting but are only offered for organization-owned
+  repositories; `ci.yml` already runs on `merge_group`, so a queue can be enabled after a move.)
+- **Block force pushes** and **Restrict deletions**.
 
-Publication retains the existing guards: an already-published version is skipped, a draft can be
-resumed, and a tag pointing at another commit requires a new app version. `pnpm version:check`
-checks synchronization without writing files. `pnpm version:sync` repairs metadata from the
-current `package.json` version without calculating a bump. `pnpm version:release` is reserved for
-the automated version PR.
+Leave **Require a pull request before merging** off: the Release workflow fast-forwards `main` to
+its version commit directly. Before doing so it validates that exact commit with `ci.yml` and marks
+it with a successful **Rust checks, rendering, and native package** commit status, so the ruleset
+accepts it. Any other push to `main` without that passing check is rejected.
+
+### Publishing a release
+
+Run **Actions → Release → Run workflow** on `main` (`.github/workflows/release.yml`) and choose:
+
+- **bump**: `patch`, `minor` or `major` adds that bump (with the optional **notes** line as its
+  changelog entry) on top of any pending changesets; Changesets uses the highest requested bump.
+  `changesets` releases only the pending notes and fails if there are none.
+
+The workflow then:
+
+1. **Bump version.** `pnpm version:release` consumes the changesets, updates `package.json` and
+   `CHANGELOG.md`, and synchronizes `appinfo.json`, the root `Cargo.toml`, the `luma` entry in
+   `Cargo.lock` and the versioned IPK examples in `readme.md`. The result is committed as
+   `Release vX.Y.Z` on a temporary `release/vX.Y.Z` branch. An existing tag stops the run.
+2. **Validate.** Calls `ci.yml` on that commit: checks, unit tests, the four desktop smoke suites and
+   the verified ARM IPK and Homebrew feed.
+3. **Publish GitHub release.** Fast-forwards `main` to the release commit (refusing if `main` moved
+   meanwhile), creates the `vX.Y.Z` GitHub release from that run's artifacts and deletes the
+   temporary branch.
+4. **Publish to Cloudflare R2.** See [Release hosting](#release-hosting-cloudflare-r2).
+
+If bumping or validation fails, `main`, tags and the published feed are untouched: fix the problem
+and run Release again. If only the R2 step fails, re-run that job or run **Publish to Cloudflare R2**
+manually with the tag. `ci.yml` on its own (PRs, manual dispatch) only validates.
+No additional token is needed; the built-in token pushes the release commit.
+
+`pnpm version:check` checks synchronization without writing files. `pnpm version:sync` repairs
+metadata from the current `package.json` version without calculating a bump. `pnpm version:release`
+is reserved for the Release workflow.
 
 Homebrew Channel's details page reads `packages[].shortDescription` (or `fullDescriptionUrl`),
 not `manifest.appDescription`. The feed generator writes the root app metadata description into
@@ -1146,7 +1175,7 @@ releases/vX.Y.Z/*.ipk      immutable release assets, sha256sums, description, ic
 releases/vX.Y.Z/repo.json  that release's mirrored feed
 ```
 
-After the CI `release` job publishes a GitHub release, the `mirror` job calls
+After the Release workflow publishes a GitHub release, its `mirror` job calls
 `.github/workflows/publish-r2.yml`. It downloads the release assets, verifies `sha256sums`, rewrites
 the feed with `tools/mirror-feed.mjs` and uploads to R2 through its S3-compatible API (versioned assets
 first, root feed last). If a zone purge token is configured it also purges `/repo.json` from

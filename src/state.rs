@@ -52,7 +52,6 @@ pub enum Target {
     RecentEmpty,
     RecentRetry,
     App(String),
-    Input(String),
     Browse,
     Filter(usize),
     ClearFilter,
@@ -210,6 +209,9 @@ pub struct State {
     pub page: Page,
     pub focus: Target,
     pub inventory: Inventory,
+    /// One Home card per HDMI input, ahead of the favorites. Faces are resolved at draw time
+    /// by [`State::input_app`], so renames and newly reported consoles show immediately.
+    pub input_apps: Vec<App>,
     pub preferences: Preferences,
     pub query: String,
     pub filter: usize,
@@ -256,6 +258,7 @@ impl State {
             page: Page::Home,
             focus: Target::Nav(0),
             inventory: Inventory::default(),
+            input_apps: vec![],
             preferences,
             query: String::new(),
             filter: 0,
@@ -473,10 +476,15 @@ impl State {
     pub fn apps(&self) -> Vec<&App> {
         let ids = self.preferences.favorites(&self.inventory.apps);
         if self.page == Page::Home {
-            return ids
+            return self
+                .input_apps
                 .iter()
-                .filter(|id| !self.preferences.hidden.contains(id))
-                .filter_map(|id| self.inventory.apps.iter().find(|app| &app.id == id))
+                .filter(|app| self.input(&app.id).is_some())
+                .chain(
+                    ids.iter()
+                        .filter(|id| !self.preferences.hidden.contains(id))
+                        .filter_map(|id| self.inventory.apps.iter().find(|app| &app.id == id)),
+                )
                 .collect();
         }
         let query = self.query.to_lowercase();
@@ -503,6 +511,58 @@ impl State {
                 .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
         });
         apps
+    }
+
+    /// A visible HDMI input by its app ID.
+    pub fn input(&self, id: &str) -> Option<&crate::model::Input> {
+        self.inventory
+            .inputs
+            .iter()
+            .find(|input| input.id == id && self.preferences.input_visible(input))
+    }
+
+    pub fn is_input(&self, id: &str) -> bool {
+        self.inventory.inputs.iter().any(|input| input.id == id)
+    }
+
+    /// The Home card for an input: a custom name wins, then the console it reports (now or
+    /// last), then the TV's label. The surface follows the console so a shared port changes
+    /// colour when another console wakes up on it.
+    pub fn input_app(&self, id: &str) -> Option<App> {
+        let input = self.inventory.inputs.iter().find(|input| input.id == id)?;
+        let device = self.preferences.input_device(input);
+        let custom = self.preferences.input_name(input);
+        let custom_device = custom.and_then(crate::model::Console::detect);
+        let title = custom
+            .or(device.map(crate::model::Console::title))
+            .unwrap_or(&input.title);
+        Some(App {
+            id: input.id.clone(),
+            title: title.into(),
+            brand: custom_device
+                .or(device)
+                .map_or("input", crate::model::Console::brand)
+                .into(),
+            category: "Inputs".into(),
+            icon: None,
+            mark: crate::view::input_icon_name(input, custom, device),
+        })
+    }
+
+    fn sync_input_apps(&mut self) {
+        self.input_apps = self
+            .inventory
+            .inputs
+            .iter()
+            .map(|input| App {
+                id: input.id.clone(),
+                title: input.port.clone(),
+                brand: "input".into(),
+                category: "Inputs".into(),
+                icon: None,
+                mark: "",
+            })
+            .collect();
     }
 
     pub fn content_viewport(&self) -> Rect {
@@ -628,27 +688,39 @@ impl State {
         }
     }
 
-    pub fn set_inventory(&mut self, next: Inventory, warning: Option<String>) {
+    /// Returns whether a newly reported console changed the saved preferences.
+    pub fn set_inventory(&mut self, next: Inventory, warning: Option<String>) -> bool {
         self.inventory.apps = next.apps;
         self.sync_custom_tiles();
+        let mut remembered = false;
         if let Some(warning) = warning {
             self.notify(warning);
         } else {
             self.inventory.inputs = next.inputs;
+            self.sync_input_apps();
+            remembered = self
+                .preferences
+                .remember_input_devices(&self.inventory.inputs);
         }
         self.loading = false;
         self.error = None;
         self.inventory_failures = 0;
         self.dirty = true;
         self.reconcile_focus();
+        remembered
     }
 
-    /// Replace only input status; leave installed apps, artwork and saved preferences alone.
-    pub fn set_inputs(&mut self, inputs: Vec<crate::model::Input>) {
+    /// Replace only input status; leave installed apps and artwork alone. Returns whether a
+    /// newly reported console changed the saved preferences, so the caller can save them.
+    pub fn set_inputs(&mut self, inputs: Vec<crate::model::Input>) -> bool {
         if self.inventory.inputs == inputs {
-            return;
+            return false;
         }
         self.inventory.inputs = inputs;
+        self.sync_input_apps();
+        let remembered = self
+            .preferences
+            .remember_input_devices(&self.inventory.inputs);
         self.dirty = true;
         self.reconcile_focus();
         let missing = |id: &str| !self.inventory.inputs.iter().any(|input| input.id == id);
@@ -666,6 +738,7 @@ impl State {
                     Target::InputMode(input.id.clone())
                 });
         }
+        remembered
     }
 
     /// A failed inventory load. Right after a cold boot, or when the TV is short of memory, the
@@ -707,15 +780,6 @@ impl State {
         }
         if let Target::App(id) = &self.focus
             && !self.apps().iter().any(|app| &app.id == id)
-        {
-            self.focus = self.first_content();
-        }
-        if let Target::Input(id) = &self.focus
-            && !self
-                .inventory
-                .inputs
-                .iter()
-                .any(|input| &input.id == id && self.preferences.input_visible(input))
         {
             self.focus = self.first_content();
         }
@@ -1087,32 +1151,7 @@ impl State {
                             self.focus(Target::App(id), controls);
                         }
                         Direction::Up => self.focus(Target::Nav(0), controls),
-                        Direction::Down => {
-                            let x = controls
-                                .iter()
-                                .find(|control| control.target == self.focus)
-                                .map_or(960., |control| control.rect.center().0);
-                            let top = controls
-                                .iter()
-                                .filter(|control| matches!(control.target, Target::Input(_)))
-                                .map(|control| control.rect.y)
-                                .fold(f32::INFINITY, f32::min);
-                            let next = controls
-                                .iter()
-                                .filter(|control| {
-                                    matches!(control.target, Target::Input(_))
-                                        && (control.rect.y - top).abs() < 1.
-                                })
-                                .min_by(|a, b| {
-                                    (a.rect.center().0 - x)
-                                        .abs()
-                                        .total_cmp(&(b.rect.center().0 - x).abs())
-                                })
-                                .map(|control| control.target.clone());
-                            if let Some(next) = next {
-                                self.focus(next, controls);
-                            }
-                        }
+                        Direction::Down => {}
                     }
                     return vec![];
                 }
@@ -1585,6 +1624,9 @@ impl State {
             self.panel_started = (!self.preferences.reduced_motion).then(Instant::now);
             self.dirty = true;
         } else if let Target::App(id) = &self.focus {
+            if self.is_input(id) {
+                return;
+            }
             self.overlay = Some(Overlay::Options {
                 id: id.clone(),
                 restore: self.focus.clone(),
@@ -1651,7 +1693,10 @@ impl State {
 
     pub fn hold(&mut self) {
         if self.page == Page::Home && self.overlay.is_none() {
-            if let Target::App(id) = &self.focus {
+            // Input cards stay at the front of the strip; only favorites reorder.
+            if let Target::App(id) = &self.focus
+                && !self.is_input(id)
+            {
                 self.moving = Some(id.clone());
                 self.notice = None;
                 self.dirty = true;
@@ -1960,7 +2005,7 @@ impl State {
             }
             Target::TvSettings => return vec![Effect::Launch("com.palm.app.settings".into())],
             Target::App(_) if self.page == Page::Apps && !self.launching => self.options(),
-            Target::App(id) | Target::Input(id) if !self.launching => {
+            Target::App(id) if !self.launching => {
                 return vec![Effect::Launch(id)];
             }
             Target::OpenApp if !self.launching => {
