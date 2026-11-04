@@ -347,66 +347,7 @@ fn companion(
     );
     match session {
         Some(Ok(session)) => {
-            let scale = (336. / (session.qr_size + 8) as f32).floor();
-            let size = (session.qr_size + 8) as f32 * scale;
-            let x = (1920. - size) / 2.;
-            let y = 310.;
-            // Invert the normal QR polarity to blend into the dark modal, while
-            // retaining a high-contrast foreground and the full quiet zone.
-            let background = c(0x1b2023, 1.);
-            let modules = c(0xf5f4ef, 1.);
-            out.shape(Rect::new(x, y, size, size), 0., background);
-            for row in 0..session.qr_size {
-                // Merge contiguous modules so QR rendering stays a few hundred quads.
-                let mut column = 0;
-                while column < session.qr_size {
-                    let mark_start = (session.qr_size - 11) / 2;
-                    let in_mark = (mark_start..mark_start + 11).contains(&row)
-                        && (mark_start..mark_start + 11).contains(&column);
-                    if in_mark {
-                        column += 1;
-                        continue;
-                    }
-                    if !session.qr[(row * session.qr_size + column) as usize] {
-                        column += 1;
-                        continue;
-                    }
-                    let start = column;
-                    while column < session.qr_size {
-                        let in_mark = (mark_start..mark_start + 11).contains(&row)
-                            && (mark_start..mark_start + 11).contains(&column);
-                        if in_mark || !session.qr[(row * session.qr_size + column) as usize] {
-                            break;
-                        }
-                        column += 1;
-                    }
-                    out.shape(
-                        Rect::new(
-                            x + (start + 4) as f32 * scale,
-                            y + (row + 4) as f32 * scale,
-                            (column - start) as f32 * scale,
-                            scale,
-                        ),
-                        0.,
-                        modules,
-                    );
-                }
-            }
-            let mark_start = (session.qr_size - 11) / 2;
-            let mark_plate = Rect::new(
-                x + (mark_start + 4) as f32 * scale,
-                y + (mark_start + 4) as f32 * scale,
-                11. * scale,
-                11. * scale,
-            );
-            out.shape(mark_plate, 1.1 * scale, background);
-            let mark = Rect::new(
-                mark_plate.x + 1.25 * scale,
-                mark_plate.y + 1.25 * scale,
-                8.5 * scale,
-                8.5 * scale,
-            );
-            out.icon(assets, "luma-mark", mark, WHITE);
+            qr_code(out, assets, session, 310.);
             out.text(
                 language.t("wallpaperUploadBrowser"),
                 Rect::new(604., 670., 712., 32.),
@@ -451,6 +392,131 @@ fn companion(
                 true,
             );
         }
+    }
+    let close = Rect::new(812., 862., 296., 56.);
+    out.pill(close, state.focus == Target::CloseDialog, false);
+    out.text(
+        language.t("close"),
+        Rect::new(close.x, close.y + 15., close.w, 28.),
+        text(20., 550, 0.),
+        c(0x171c20, 1.),
+        true,
+    );
+    out.control(Target::CloseDialog, close, false);
+}
+
+/// A centered, inverted QR code with the Luma mark in its middle, `y` from the top.
+fn qr_code(out: &mut Scene, assets: &Assets, session: &crate::companion::Session, y: f32) {
+    let scale = (336. / (session.qr_size + 8) as f32).floor();
+    let size = (session.qr_size + 8) as f32 * scale;
+    let x = (1920. - size) / 2.;
+    // Invert the normal QR polarity to blend into the dark modal, while
+    // retaining a high-contrast foreground and the full quiet zone.
+    let background = c(0x1b2023, 1.);
+    let modules = c(0xf5f4ef, 1.);
+    out.shape(Rect::new(x, y, size, size), 0., background);
+    for row in 0..session.qr_size {
+        // Merge contiguous modules so QR rendering stays a few hundred quads.
+        let mut column = 0;
+        while column < session.qr_size {
+            let mark_start = (session.qr_size - 11) / 2;
+            let in_mark = (mark_start..mark_start + 11).contains(&row)
+                && (mark_start..mark_start + 11).contains(&column);
+            if in_mark {
+                column += 1;
+                continue;
+            }
+            if !session.qr[(row * session.qr_size + column) as usize] {
+                column += 1;
+                continue;
+            }
+            let start = column;
+            while column < session.qr_size {
+                let in_mark = (mark_start..mark_start + 11).contains(&row)
+                    && (mark_start..mark_start + 11).contains(&column);
+                if in_mark || !session.qr[(row * session.qr_size + column) as usize] {
+                    break;
+                }
+                column += 1;
+            }
+            out.shape(
+                Rect::new(
+                    x + (start + 4) as f32 * scale,
+                    y + (row + 4) as f32 * scale,
+                    (column - start) as f32 * scale,
+                    scale,
+                ),
+                0.,
+                modules,
+            );
+        }
+    }
+    let mark_start = (session.qr_size - 11) / 2;
+    let mark_plate = Rect::new(
+        x + (mark_start + 4) as f32 * scale,
+        y + (mark_start + 4) as f32 * scale,
+        11. * scale,
+        11. * scale,
+    );
+    out.shape(mark_plate, 1.1 * scale, background);
+    let mark = Rect::new(
+        mark_plate.x + 1.25 * scale,
+        mark_plate.y + 1.25 * scale,
+        8.5 * scale,
+        8.5 * scale,
+    );
+    out.icon(assets, "luma-mark", mark, WHITE);
+}
+
+/// Installs the Home Assistant integration from a phone: HACS opens from the QR code, then
+/// Home Assistant discovers this TV and asks for the pairing code that Luma shows.
+fn home_assistant_setup(out: &mut Scene, state: &State, assets: &Assets) {
+    let language = state.preferences.language;
+    let panel = Rect::new(520., 144., 880., 816.);
+    out.modal = Some(panel);
+    out.shadow(panel, 24., 40., 12., 0.3);
+    out.shape(panel, 24., c(0x1b2023, 1.));
+    out.border(panel, 24., 1., c(0xffffff, 0.09));
+    out.text(
+        language.t("homeAssistantSetup"),
+        Rect::new(584., 198., 752., 48.),
+        text(32., 550, -0.02),
+        WHITE,
+        true,
+    );
+    out.text(
+        language.t("homeAssistantSetupHint"),
+        Rect::new(604., 264., 712., 32.),
+        text(19., 400, 0.).leading(1.5),
+        c(0xffffff, 0.65),
+        true,
+    );
+    match &state.home_assistant_qr {
+        Some(Ok(session)) => qr_code(out, assets, session, 310.),
+        _ => out.text(
+            language.t("homeAssistantFailed"),
+            Rect::new(604., 470., 712., 90.),
+            text(22., 450, 0.).leading(1.5),
+            c(0xffffff, 0.75),
+            true,
+        ),
+    }
+    out.text(
+        language.t("homeAssistantSetupNext"),
+        Rect::new(604., 670., 712., 60.),
+        text(19., 400, 0.).leading(1.5),
+        c(0xffffff, 0.65),
+        true,
+    );
+    if let Some(address) = &state.home_assistant_address {
+        let address = language.format("homeAssistantListening", &[("address", address)]);
+        out.text(
+            &address,
+            Rect::new(568., 770., 784., 36.),
+            assets.fit_text(&address, text(22., 600, 0.), 784.),
+            WHITE,
+            true,
+        );
     }
     let close = Rect::new(812., 862., 296., 56.);
     out.pill(close, state.focus == Target::CloseDialog, false);
@@ -601,7 +667,8 @@ pub fn scene_with_pill(
         | Overlay::BackgroundDelete { .. }
         | Overlay::Keyboard
         | Overlay::WallpaperUpload
-        | Overlay::TileEditor),
+        | Overlay::TileEditor
+        | Overlay::HomeAssistantSetup),
     ) = &state.overlay
     {
         let anchor = match overlay {
@@ -652,6 +719,7 @@ pub fn scene_with_pill(
             Overlay::Keyboard => keyboard(&mut out, state, assets),
             Overlay::WallpaperUpload => wallpaper_upload(&mut out, state, assets),
             Overlay::TileEditor => tile_editor(&mut out, state, assets),
+            Overlay::HomeAssistantSetup => home_assistant_setup(&mut out, state, assets),
             Overlay::SystemKeyboard | Overlay::Recents { .. } => {}
         }
         if !matches!(
@@ -2297,8 +2365,21 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     }),
                     false,
                 ),
+                (
+                    8,
+                    "homeAssistant",
+                    "tv",
+                    Some(if state.preferences.home_assistant {
+                        language.t("stateOn")
+                    } else {
+                        language.t("stateOff")
+                    }),
+                    false,
+                ),
+                (9, "homeAssistantSetup", "arrow", None, true),
             ]
             .into_iter()
+            .filter(|(index, ..)| *index != 9 || state.preferences.home_assistant)
             .enumerate()
             {
                 row(

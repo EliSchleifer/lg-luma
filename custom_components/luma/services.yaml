@@ -1,0 +1,96 @@
+show_camera:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: luma
+    camera:
+      selector:
+        entity:
+          domain: camera
+    stream_url:
+      example: 'http://192.168.1.10:1984/api/stream.mjpeg?src=front_door'
+      selector:
+        text:
+          type: url
+    snapshot_url:
+      example: 'http://192.168.1.10:1984/api/frame.jpeg?src=front_door'
+      selector:
+        text:
+          type: url
+    mode:
+      default: stream
+      selector:
+        select:
+          translation_key: mode
+          options:
+            - stream
+            - snapshot
+    refresh:
+      default: 1
+      selector:
+        number:
+          min: 0.25
+          max: 30
+          step: 0.25
+          unit_of_measurement: s
+    title:
+      example: Front door
+      selector:
+        text:
+    message:
+      example: Someone is at the door
+      selector:
+        text:
+    duration:
+      default: 30
+      selector:
+        number:
+          min: 5
+          max: 600
+          unit_of_measurement: s
+    position:
+      default: top-right
+      selector:
+        select:
+          translation_key: position
+          options:
+            - top-right
+            - top-left
+            - bottom-right
+            - bottom-left
+    size:
+      default: medium
+      selector:
+        select:
+          translation_key: size
+          options:
+            - small
+            - medium
+            - large
+    pause:
+      default: false
+      selector:
+        boolean:
+    base_url:
+      example: 'http://192.168.1.10:8123'
+      selector:
+        text:
+          type: url
+dismiss:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: luma
+notify:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: luma
+    message:
+      required: true
+      example: The washer is done
+      selector:
+        text:

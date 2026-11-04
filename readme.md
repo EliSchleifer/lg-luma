@@ -261,6 +261,14 @@ Shortcut tiles sit on Home like apps but send a web request when selected, for e
 Assistant webhook. Open **Settings → Widgets → Shortcuts → Configure** and scan
 the QR code.
 
+### Home Assistant camera overlays
+
+Show a camera, such as a UniFi Protect doorbell, in a corner of the screen over whatever is
+playing, with the option to pause the show until it closes, plus notification toasts. Turn on
+**Settings → General → Home Assistant** and scan the QR code with your phone: it opens HACS on
+your Home Assistant with the `luma` integration ready to install. Home Assistant then finds the TV
+and asks for the code shown on it. See [Home Assistant](home-assistant.md).
+
 ## Development
 
 ### Setup & Building

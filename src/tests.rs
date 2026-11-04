@@ -3280,3 +3280,48 @@ fn update_card_shows_progress_restores_retry_and_ignores_presses_while_busy() {
     state.install_response(Response::Finished(Ok(())));
     assert_eq!(state.update_status, Status::Unchecked);
 }
+
+#[test]
+fn turning_on_home_assistant_opens_the_hacs_qr_dialog_and_adds_a_reopen_row() {
+    let mut state = ready();
+    state.open(2);
+    let rows = |state: &State| {
+        scene(state)
+            .controls
+            .iter()
+            .filter(|control| matches!(control.target, Target::Setting(8 | 9)))
+            .count()
+    };
+    assert_eq!(rows(&state), 1);
+    state.focus = Target::Setting(8);
+    assert_eq!(state.activate(), vec![Effect::Save]);
+    assert!(state.preferences.home_assistant);
+    assert!(matches!(state.overlay, Some(Overlay::HomeAssistantSetup)));
+    assert_eq!(state.focus, Target::CloseDialog);
+    let qr = state.home_assistant_qr.clone().unwrap().unwrap();
+    assert_eq!(qr.url, crate::home_assistant::HACS_LINK);
+    state.home_assistant_address = Some("192.168.1.50:5862".into());
+    let dialog = scene(&state);
+    assert!(dialog.modal.is_some());
+    assert!(
+        dialog
+            .controls
+            .iter()
+            .all(|control| control.target == Target::CloseDialog)
+    );
+    state.back();
+    assert!(state.overlay.is_none());
+    assert!(state.home_assistant_qr.is_none());
+    assert_eq!(state.focus, Target::Setting(9));
+    assert_eq!(rows(&state), 2);
+    // The second row reopens the dialog without touching the setting or its pairings.
+    assert_eq!(state.activate(), vec![]);
+    assert!(matches!(state.overlay, Some(Overlay::HomeAssistantSetup)));
+    assert!(state.preferences.home_assistant);
+    state.back();
+    state.focus = Target::Setting(8);
+    state.activate();
+    assert!(!state.preferences.home_assistant);
+    assert!(state.overlay.is_none());
+    assert_eq!(rows(&state), 1);
+}

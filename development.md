@@ -379,6 +379,68 @@ redirects or proxy) without saving, and reports the result to the page.
 and session rotation over loopback; `await-tile-editor` waits for the modal's link in scripted runs.
 Verify scanning, editing and a test request against a real webhook on TV hardware.
 
+## Home Assistant overlay
+
+**Settings → General → Home Assistant** (`home_assistant`, default Off) starts a persistent
+listener on port 5862 (`src/home_assistant.rs`), unlike the short-lived companion sessions. It binds
+every interface, because the TV's address can change, and answers only loopback, private and
+link-local peers. Requests are small and handled in turn on the service's own thread, with a
+three-second deadline and a 16 KiB body limit, reusing `companion::request`.
+
+Pairing: `POST /api/pair` shows a six-digit code as a system toast (and a Luma notice when Luma is
+in front). `POST /api/pair/confirm` trades it for a 256-bit token. Codes expire after two minutes,
+five wrong codes cancel the request, new requests are rate-limited, and at most eight servers
+pair. `home-assistant.json`, next to the preferences file, stores a stable device ID and SHA-256
+digests of tokens with mode 0600. Turning the setting off closes the listener, closes any overlay
+and forgets every pairing. Requests with an `Origin` header are refused, except the overlay page's
+close report, which must come from loopback with the session's random nonce.
+
+The overlay is a separate web app, `overlay/` (`com.ecklf.luma.overlay`), because only a web app's
+`appinfo.json` can ask for the transparent `defaultWindowType: overlay` window that keeps the
+foreground app running; SDL-webOS cannot set `_WEBOS_WINDOW_TYPE`. `tools/package.mjs` builds it
+as its own IPK with Luma's version and stages it in Luma's package as `overlay/overlay.package` (ares-package drops any path
+containing `.ipk` from an app; the helper copies it to `/tmp/luma-overlay.ipk` to install it)
+with its `appinfo.json`, which `tools/ipk.mjs` verifies. `luma-helper overlay install` (root, in
+process for a root Home) installs it via `appInstallService/dev/install` when the installed
+version differs. The page is plain script for webOS 4's Chromium 53; `overlay/logic.js` holds the
+testable helpers. Luma launches it with launch parameters; a second request relaunches it, which
+the page handles via `webOSRelaunch`. Back or its timer closes the page, which reports to Luma.
+
+`pause: true` asks `luma-helper overlay pause` for the first `playing` pipeline from
+`com.webos.media/getForegroundAppInfo` and pauses it. Luma resumes that media ID once the page
+reports closing, on `DELETE /api/overlay`, or `duration` plus five seconds after launch, whichever
+comes first. A replacement overlay keeps the original paused ID. System toasts use
+`com.webos.notification/createToast`, falling back to `luma-helper overlay toast`, which sends as
+Luma with root `luna-send -a`.
+
+The Home Assistant integration lives in `custom_components/luma` (installable through HACS,
+`hacs.json`). It discovers LG TVs through the LG webOS TV integration's SSDP announcement and
+keeps only those where `GET /api/info` answers as Luma, suggests hosts and names from existing
+`webostv` entries, pairs in its config flow, and starts reauth when the TV answers 401. For a
+camera entity it sends Home Assistant's `camera_proxy_stream`/`camera_proxy` URLs signed with the
+camera's access token, from the internal URL unless `base_url` is given.
+
+Rust tests drive the API without sockets through a recording `Tv` (pairing, lockout, validation,
+pause/resume, timeouts, persistence) plus one loopback HTTP round trip; helper tests use the
+fixture `System`. `pnpm test:overlay` checks the page helpers and window flags. The Home Assistant
+tests need `pytest-homeassistant-custom-component` (see `.github/workflows/home-assistant.yml`):
+
+```sh
+python -m pip install pytest-homeassistant-custom-component==0.13.316 ruff==0.17.3
+ruff check . && ruff format --check .
+python -m pytest -p no:cacheprovider tests/home-assistant
+```
+
+Turning the setting on opens a dialog (`Overlay::HomeAssistantSetup`) with a QR code for
+`HACS_LINK`, a My Home Assistant redirect that opens HACS on the owner's server with this
+repository's integration; it shows the listener's address once bound. While the setting is on,
+**Add to Home Assistant** (`Setting(9)`) reopens it, so seeing the code again never requires
+turning the setting off and forgetting pairings. The QR code uses the companion dialogs'
+inverted drawing (`view::qr_code`).
+
+Desktop builds serve the same API and print overlay launches and toasts instead of calling webOS.
+Verify overlay stacking, key focus, pausing and the overlay install on TV hardware.
+
 ## Splash images
 
 `pnpm assets` renders one 1920×1080 PNG per background into `.build/assets/splash/` from the shaded

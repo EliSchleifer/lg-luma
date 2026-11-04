@@ -1,0 +1,19 @@
+{
+  "id": "com.ecklf.luma.overlay",
+  "version": "0.0.0",
+  "vendor": "Luma",
+  "type": "web",
+  "main": "index.html",
+  "title": "Luma Overlay",
+  "icon": "icon.png",
+  "appDescription": "Camera and notification overlay for Luma's Home Assistant integration.",
+  "resolution": "1920x1080",
+  "transparent": true,
+  "defaultWindowType": "overlay",
+  "visible": false,
+  "handlesRelaunch": true,
+  "noSplashOnLaunch": true,
+  "spinnerOnLaunch": false,
+  "disableBackHistoryAPI": true,
+  "requiredACG": []
+}

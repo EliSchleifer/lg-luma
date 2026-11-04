@@ -494,6 +494,66 @@ fn sync_splash(background: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Launches (or relaunches, for an app that is already open) `id` with launch parameters.
+pub fn launch_with_params(id: &str, params: &Value) -> Result<(), String> {
+    if !valid_app_id(id) {
+        return Err("Invalid application identifier".into());
+    }
+    call(
+        "luna://com.webos.applicationManager/launch",
+        json!({"id": id, "params": params}),
+    )
+    .map(|_| ())
+}
+
+/// A root `luma-helper overlay` command: in process when Luma already runs as root (Home
+/// takeover), otherwise through Homebrew Channel's exec like the other helper operations.
+pub fn overlay_helper(command: &str, argument: Option<&str>) -> Result<Value, String> {
+    let directory = install_dir()?;
+    #[cfg(all(feature = "webos", unix))]
+    if unsafe { libc::geteuid() } == 0 {
+        return luma_tv_helper::overlay::dispatch(
+            &luma_tv_helper::system::Tv,
+            command,
+            argument,
+            &directory,
+        );
+    }
+    let _ = &directory;
+    let mut arguments = vec![command.to_owned()];
+    arguments.extend(argument.map(str::to_owned));
+    let command = helper_command("overlay", &arguments)?;
+    #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
+    let envelope = crate::luna::call_with_timeout(
+        "luna://org.webosbrew.hbchannel.service/exec",
+        &json!({"command": command}),
+        std::time::Duration::from_secs(75),
+    );
+    #[cfg(not(all(feature = "webos", target_os = "linux", target_arch = "arm")))]
+    let envelope = raw_call(
+        "luna://org.webosbrew.hbchannel.service/exec",
+        &json!({"command": command}),
+    );
+    envelope
+        .and_then(checked_response)
+        .and_then(|envelope| command_reply(&envelope))
+}
+
+/// A system toast, visible over whichever app is in front.
+pub fn toast(message: &str) -> Result<(), String> {
+    call(
+        "luna://com.webos.notification/createToast",
+        json!({"sourceId": APP_ID, "message": message, "noaction": true}),
+    )
+    .map(|_| ())
+    .or_else(|error| {
+        // An anonymous LS2 caller may not satisfy the sourceId check; root can send as Luma.
+        overlay_helper("toast", Some(message))
+            .map(|_| ())
+            .map_err(|fallback| format!("{error}; {fallback}"))
+    })
+}
+
 /// Protect launcher identities and vendor system namespaces, never titles.
 /// Conservatively includes removable vendor apps until firmware provides a
 /// reliable cross-version removability flag.
@@ -508,6 +568,7 @@ pub fn can_uninstall(id: &str) -> bool {
             id,
             APP_ID
                 | HOME_ID
+                | crate::home_assistant::OVERLAY_ID
                 | "com.luma.native"
                 | "com.luma.launcher"
                 | "com.luma.launcher.native"
@@ -799,6 +860,7 @@ pub fn normalize_apps(raw: &Value) -> Result<Vec<App>, String> {
         let live = id == "com.webos.app.livetv";
         let visible = entry.get("visible");
         if id == APP_ID
+            || id == crate::home_assistant::OVERLAY_ID
             || id == "com.luma.native"
             || id == "com.luma.launcher"
             || id == "com.luma.launcher.native"

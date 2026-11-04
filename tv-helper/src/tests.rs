@@ -955,3 +955,111 @@ fn persistent_preferences_win_over_package_local_migration_and_active_stages_ref
         b"prism"
     );
 }
+fn overlay_bundle(f: &Fixture, version: &str) {
+    f.put_json(
+        &format!("{DIR}/overlay/appinfo.json"),
+        json!({"id":overlay::OVERLAY,"version":version}),
+    );
+    f.put(&format!("{DIR}/overlay/overlay.package"), b"ipk");
+}
+#[test]
+fn overlay_install_skips_the_current_version_and_waits_for_an_update() {
+    let f = Fixture::new();
+    overlay_bundle(&f, "2.18.0");
+    f.reply(
+        "getAppInfo",
+        Ok(json!({"returnValue":true,"appInfo":{"version":"2.18.0"}})),
+    );
+    let reply = overlay::dispatch(&f, "install", None, Path::new(DIR)).unwrap();
+    assert_eq!(reply["changed"], false);
+    assert!(!f.calls().iter().any(|c| c.contains("appInstallService")));
+
+    for value in [
+        json!({"returnValue":false,"errorText":"not found"}),
+        json!({"returnValue":false,"errorText":"not found"}),
+        json!({"returnValue":true,"appInfo":{"version":"2.18.0"}}),
+    ] {
+        f.reply("getAppInfo", Ok(value));
+    }
+    f.reply("install", Ok(json!({"returnValue":true})));
+    let reply = overlay::dispatch(&f, "install", None, Path::new(DIR)).unwrap();
+    assert_eq!(reply["changed"], true);
+    let install = f
+        .calls()
+        .into_iter()
+        .find(|c| c.contains("appInstallService/dev/install"))
+        .unwrap();
+    assert!(
+        install.contains(r#""ipkUrl":"/tmp/luma-overlay.ipk""#),
+        "{install}"
+    );
+    // The staged copy is removed once the install finished.
+    assert!(!f.p("/tmp/luma-overlay.ipk").exists());
+    assert_eq!(f.pauses.get(), 2);
+}
+#[test]
+fn overlay_install_rejects_a_foreign_bundle_and_requires_root() {
+    let f = Fixture::new();
+    f.put_json(
+        &format!("{DIR}/overlay/appinfo.json"),
+        json!({"id":"evil.app","version":"1"}),
+    );
+    assert!(overlay::dispatch(&f, "install", None, Path::new(DIR)).is_err());
+    f.uid.set(501);
+    assert!(overlay::dispatch(&f, "close", None, Path::new(DIR)).is_err());
+    assert!(f.calls().is_empty());
+}
+#[test]
+fn overlay_pause_targets_only_a_playing_pipeline_and_resume_validates_ids() {
+    let f = Fixture::new();
+    f.reply(
+        "getForegroundAppInfo",
+        Ok(json!({"returnValue":true,"foregroundAppInfo":[
+            {"appId":"netflix","mediaId":"_idle","playState":"paused"},
+            {"appId":"netflix","mediaId":"_Xy12","playState":"playing"}
+        ]})),
+    );
+    f.reply("pause", Ok(json!({"returnValue":true})));
+    let reply = overlay::dispatch(&f, "pause", None, Path::new(DIR)).unwrap();
+    assert_eq!(reply["mediaId"], "_Xy12");
+    assert!(f.calls().last().unwrap().contains(r#"{"mediaId":"_Xy12"}"#));
+
+    f.reply(
+        "getForegroundAppInfo",
+        Ok(json!({"returnValue":true,"foregroundAppInfo":[]})),
+    );
+    let reply = overlay::dispatch(&f, "pause", None, Path::new(DIR)).unwrap();
+    assert!(reply["mediaId"].is_null());
+
+    assert!(overlay::dispatch(&f, "resume", Some("'; reboot"), Path::new(DIR)).is_err());
+    f.reply("play", Ok(json!({"returnValue":true})));
+    overlay::dispatch(&f, "resume", Some("_Xy12"), Path::new(DIR)).unwrap();
+    assert!(
+        f.calls()
+            .last()
+            .unwrap()
+            .ends_with(r#"{"mediaId":"_Xy12"}"#)
+    );
+}
+#[test]
+fn overlay_close_tolerates_an_overlay_that_already_closed() {
+    let f = Fixture::new();
+    f.close_normal.set(false);
+    let reply = overlay::dispatch(&f, "close", None, Path::new(DIR)).unwrap();
+    assert_eq!(reply["closed"], false);
+}
+#[test]
+fn overlay_toast_is_sent_as_luma_and_bounded() {
+    let f = Fixture::new();
+    f.reply(
+        "createToast",
+        Ok(json!({"returnValue":true,"toastId":"t1"})),
+    );
+    overlay::dispatch(&f, "toast", Some("Front door"), Path::new(DIR)).unwrap();
+    let call = f.calls().pop().unwrap();
+    assert!(call.contains(&format!(
+        "-a {APP} luna://com.webos.notification/createToast"
+    )));
+    assert!(overlay::dispatch(&f, "toast", Some(&"x".repeat(301)), Path::new(DIR)).is_err());
+    assert!(overlay::dispatch(&f, "toast", Some(" "), Path::new(DIR)).is_err());
+}

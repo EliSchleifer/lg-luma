@@ -2,7 +2,7 @@
 #[path = "../../src/webos-compat.rs"]
 mod webos_compat;
 use luma_tv_helper::{
-    files, home, input,
+    files, home, input, overlay,
     system::{System, Tv},
     uninstall,
 };
@@ -11,7 +11,7 @@ fn run() -> luma_tv_helper::Result<Value> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|s| s == "--help") {
         println!(
-            "luma-helper: home COMMAND [APP_DIR] [HOME_ID] | read-app-icon JSON | sync-splash JSON | uninstall-app ID | tv-input COMMAND [APP_DIR]"
+            "luma-helper: home COMMAND [APP_DIR] [HOME_ID] | read-app-icon JSON | sync-splash JSON | uninstall-app ID | tv-input COMMAND [APP_DIR] | overlay install|close|pause|resume MEDIA_ID|toast MESSAGE"
         );
         return Ok(serde_json::json!({"returnValue":true}));
     }
@@ -55,16 +55,24 @@ fn run() -> luma_tv_helper::Result<Value> {
             let directory = args
                 .get(2)
                 .map(std::path::PathBuf::from)
-                .or_else(|| {
-                    std::env::current_exe()
-                        .ok()
-                        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-                })
-                .ok_or("Cannot determine installation")?;
+                .map_or_else(installation, Ok)?;
             input::configure(&sys, arg(1)?, &directory)
         }
+        // The installation is always the helper's own directory, never a caller's path.
+        "overlay" => overlay::dispatch(
+            &sys,
+            arg(1)?,
+            args.get(2).map(String::as_str),
+            &installation()?,
+        ),
         _ => Err("Unknown TV helper command".into()),
     }
+}
+fn installation() -> luma_tv_helper::Result<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .ok_or_else(|| "Cannot determine installation".into())
 }
 fn main() {
     match run() {

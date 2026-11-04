@@ -1,0 +1,168 @@
+# Home Assistant
+
+Luma can show a camera in a corner of the TV **over whatever is playing**, for example your UniFi
+Protect doorbell when someone rings, and short notifications ("The washer is done"). Home
+Assistant calls the TV; the TV never needs your Home Assistant password.
+
+> [!IMPORTANT]
+> The overlay relies on webOS's `overlay` window type for a transparent web app
+> (`com.ecklf.luma.overlay`). It is not a documented LG contract. The same approach is used by
+> [LG Camera Overlay](https://github.com/mbsintegrations/LG-Camera-Overlay), but DRM-protected
+> apps, some firmware and some models may behave differently. Please report what works on yours.
+
+## What you get
+
+- **`luma.show_camera`**: a camera card in a corner of the screen with a title, an optional second
+  line and a countdown. **Back** on the remote closes it early; otherwise it closes after its
+  duration. Choose whether the show keeps playing underneath or pauses until the card closes.
+- **`luma.dismiss`** and a **Dismiss overlay** button: close the card from Home Assistant, for
+  example when the door opens.
+- **`luma.notify`** and a **Toast** notify entity: a standard webOS toast over any app.
+
+## Set up
+
+1. **On the TV**, open **Luma → Settings → General** and turn on **Home Assistant**. Luma shows a
+   QR code and the address Home Assistant should use (for example `192.168.1.50:5862`). The first
+   time, Luma also installs its small overlay app from its own package. This needs Homebrew
+   Channel's root service, like Luma's other TV features. To see the QR code again later, choose
+   **Add to Home Assistant** below the setting.
+2. **Install the integration** (you need [HACS](https://hacs.xyz)):
+   - **From the QR code:** scan it with your phone. It opens HACS on your Home Assistant with
+     **Luma for LG webOS** ready to download, through the
+     [My Home Assistant](https://my.home-assistant.io) link
+     `https://my.home-assistant.io/redirect/hacs_repository/?owner=EliSchleifer&repository=lg-luma&category=integration`.
+     The first time, My Home Assistant asks for your Home Assistant's address.
+   - **By hand in HACS:** add `https://github.com/EliSchleifer/lg-luma` as a custom repository of
+     type _Integration_, then download **Luma for LG webOS**.
+   - **Without HACS:** copy `custom_components/luma` from this repository into your Home Assistant
+     `config/custom_components/` folder.
+
+   Restart Home Assistant.
+
+3. Home Assistant usually discovers the TV on its own, using the same announcement as the built-in
+   LG webOS TV integration. Otherwise, add **Luma for LG webOS** under **Settings → Devices &
+   services** and enter the TV's address. When you already use the LG webOS TV integration, its
+   address and name are suggested.
+4. The TV shows a **six-digit pairing code**. Type it into Home Assistant. Codes expire after two
+   minutes, and five wrong codes cancel the request.
+
+Turning **Home Assistant** off in Luma closes the port and forgets every paired server. Home
+Assistant then asks you to pair again the next time it is needed. Removing the integration in Home
+Assistant also unpairs it from the TV when the TV is on.
+
+## Camera images
+
+The TV loads camera images itself, so the address must be reachable from the TV.
+
+- **A camera entity** (`camera:`) is easiest. Home Assistant passes the TV its own camera proxy
+  addresses, signed with the camera's short-lived access token: a motion-JPEG stream with snapshot
+  fallback, or snapshots only with `mode: snapshot`. Home Assistant uses its **local network URL**
+  (**Settings → System → Network**); pass `base_url` if the TV needs another one. Camera tokens
+  rotate every few minutes, so keep snapshot-mode overlays shorter than that.
+- **go2rtc** (built into Home Assistant, or as an add-on) gives a smoother, lighter feed from a
+  camera's low-resolution channel. Pass its URLs directly:
+
+  ```yaml
+  stream_url: http://192.168.1.10:1984/api/stream.mjpeg?src=front_door
+  snapshot_url: http://192.168.1.10:1984/api/frame.jpeg?src=front_door
+  ```
+
+The TV shows motion-JPEG and JPEG only. It does not decode RTSP/H.264, so the TV's video decoder
+stays with the show you are watching.
+
+## Doorbell example
+
+UniFi Protect doorbells have an `event` entity that changes on every ring:
+
+```yaml
+automation:
+  - alias: Doorbell on the TV
+    triggers:
+      - trigger: state
+        entity_id: event.front_door_doorbell
+        not_from: unavailable
+    actions:
+      - action: luma.show_camera
+        data:
+          camera: camera.front_door_medium_resolution_channel
+          message: Someone is at the door
+          duration: 45
+          position: top-right
+          size: medium
+          # true pauses the show until the card closes, then resumes it.
+          pause: "{{ is_state('input_boolean.pause_tv_for_doorbell', 'on') }}"
+
+  - alias: Close the doorbell card when the door opens
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.front_door_contact
+        to: 'on'
+    actions:
+      - action: luma.dismiss
+```
+
+Leave out `config_entry_id` to show the camera on every paired TV, or pick one TV in the action
+editor.
+
+| Field                        | Default     | Notes                                                          |
+| ---------------------------- | ----------- | -------------------------------------------------------------- |
+| `camera`                     |             | A camera entity; or give `stream_url` / `snapshot_url`.        |
+| `stream_url`, `snapshot_url` |             | Absolute `http(s)` URLs the TV can load.                       |
+| `mode`                       | `stream`    | `stream` (motion-JPEG, falls back to snapshots) or `snapshot`. |
+| `refresh`                    | `1`         | Seconds between snapshots, 0.25–30.                            |
+| `title`, `message`           | camera name | Up to 80 and 200 characters.                                   |
+| `duration`                   | `30`        | Seconds, 5–600.                                                |
+| `position`                   | `top-right` | Any corner.                                                    |
+| `size`                       | `medium`    | `small` (480 px), `medium` (640 px) or `large` (800 px).       |
+| `pause`                      | `false`     | Pause playback until the card closes.                          |
+
+A second ring while the card is showing replaces it. When the first ring paused the show, it stays
+paused until the replacement closes.
+
+**Pause** pauses the playing media pipeline and resumes the same one afterwards. Apps that play
+through webOS's media service (most streaming apps) pause; Live TV and apps with their own player
+may keep playing. To pause such apps another way, call `media_player.media_pause` on the LG webOS TV
+entity before `luma.show_camera`.
+
+## While the card is showing
+
+The card has key focus, so **Back** closes it. Other remote keys, such as play/pause, may not reach
+the app underneath until it closes. How webOS routes keys to overlay windows depends on firmware.
+
+## Security
+
+- The port (`5862`) only exists while **Home Assistant** is on in Luma. It answers only devices on
+  the TV's private network.
+- Every action needs a token that was issued by entering the on-screen code. The TV stores only
+  SHA-256 digests of tokens.
+- Requests carrying a browser `Origin` header are refused, so web pages cannot use the API. The
+  one exception is the overlay app reporting that it closed, which is accepted only from the TV
+  itself and only with that overlay's random nonce.
+- Camera URLs must be `http` or `https`. The TV loads them as images only.
+
+## API
+
+Home Assistant uses this API. You can script it too: send JSON bodies, with
+`Authorization: Bearer TOKEN` on every endpoint except `info` and the two pairing steps.
+
+| Endpoint                 | Body                              | Reply                             |
+| ------------------------ | --------------------------------- | --------------------------------- |
+| `GET /api/info`          |                                   | `id`, `name`, `version`, `api`    |
+| `POST /api/pair`         | `name`                            | `pairing_id`; the TV shows a code |
+| `POST /api/pair/confirm` | `pairing_id`, `code`              | `token`, `id`                     |
+| `DELETE /api/pair`       |                                   | Unpairs this token                |
+| `GET /api/status`        |                                   | `overlay`, `overlay_ready`        |
+| `POST /api/overlay`      | As `luma.show_camera`, using URLs | `session`, `paused`               |
+| `DELETE /api/overlay`    |                                   | Closes the card, resumes playback |
+| `POST /api/notify`       | `message` (up to 300 characters)  | Shows a webOS toast               |
+
+## Troubleshooting
+
+- **Home Assistant cannot find the TV:** check that the TV is on, Luma is running (it is when it
+  replaces LG Home) and **Home Assistant** is on in Luma's settings.
+- **The card says "Camera unavailable":** open the camera URL from another device on the TV's
+  network. With a camera entity, check Home Assistant's local network URL or pass `base_url`.
+- **Nothing appears over an app:** the TV may not allow overlay windows over that app (DRM) or on
+  that firmware. `luma.notify` toasts still work there.
+- **"The overlay app is still being installed":** the first install after turning the setting on
+  takes a few seconds. Try again; if it persists, turn **Home Assistant** off and on in Luma.
