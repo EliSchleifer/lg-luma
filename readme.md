@@ -149,20 +149,11 @@ Give the TV a fixed address first: add a DHCP reservation on your router, e.g. `
 ### Add the TV to your Home Assistant tunnel
 
 The Home Assistant **Cloudflared** add-on already runs a tunnel on the LAN, so add the TV to it as
-another hostname. Nothing is installed on the TV.
-
-- **Dashboard-managed tunnel** (the add-on was given a tunnel token): Zero Trust → **Networks →
-  Tunnels** → your tunnel → **Public Hostname → Add**: subdomain `tv`, domain `elischleifer.com`,
-  service type **SSH**, URL `192.168.1.50:22`.
-- **Add-on-managed tunnel** (hostnames are listed in the add-on configuration): add
-
-  ```yaml
-  additional_hosts:
-    - hostname: tv.elischleifer.com
-      service: ssh://192.168.1.50:22
-  ```
-
-  then restart the add-on. It creates the DNS record.
+another hostname. Nothing is installed on the TV. When the add-on uses a **Cloudflare Tunnel Token**,
+its Additional Hosts list is ignored; add the route in the dashboard instead: Zero Trust →
+**Networks → Tunnels** → the Home Assistant tunnel → **Add route → Published application**:
+subdomain `tv`, domain `elischleifer.com`, service type **SSH**, URL `192.168.1.50:22`. Use the TV's
+LAN address, not `localhost`, which would be the Home Assistant box itself.
 
 ### Lock it down with Cloudflare Access (recommended)
 
@@ -176,17 +167,27 @@ SSH key is checked.
 brew install cloudflared
 ```
 
-Add this to `~/.ssh/config`, using the key the TV already trusts:
+Add this to `~/.ssh/config`, using the key listed in the TV's `/home/root/.ssh/authorized_keys`:
 
 ```text
 Host tv tv.elischleifer.com
   HostName tv.elischleifer.com
   User root
-  IdentityFile ~/.ssh/id_ed25519
+  IdentityFile ~/.ssh/lg_tv
+  IdentitiesOnly yes
   ProxyCommand /opt/homebrew/bin/cloudflared access ssh --hostname %h
 ```
 
 Then `ssh tv`. `scp -O file tv:/tmp/` also works, so the [SSH install](#ssh) steps work remotely.
+
+Troubleshooting:
+
+- **Password prompt:** the tunnel works, but the TV refused the offered key. Check that `IdentityFile`
+  names a key whose public half is in root's `authorized_keys`.
+- **`websocket: bad handshake`:** Cloudflare could not reach the TV. In standby the TV's network and
+  SSH server are suspended, so it is reachable only while on. To wake it remotely, enable **Settings →
+  General → Devices → TV Management → Turn on via Wi-Fi** and power it on from Home Assistant (LG webOS
+  TV integration or Wake-on-LAN), then wait about 20 seconds.
 
 ## Replacing LG Home
 
