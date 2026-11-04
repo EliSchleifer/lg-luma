@@ -191,8 +191,11 @@ a soundbar that rarely need their own card. There it opens the input on OK and i
 under its card title or port; it never appears in category tabs or Hidden.
 
 Visible HDMI inputs are cards at the far left of the Home favorites strip, ordered by port, rather
-than a separate row. They launch like apps but are not favorites: they cannot be reordered, hidden
-from Apps or opened in app options, and only **Apps only** inputs appear on the Apps page. Visibility and names
+than a separate row. They launch like apps and cannot be reordered, hidden or deleted. Holding OK on
+an input card (or pressing the options key) opens its options: **Open** and **Remove from
+favorites**, which switches the input to **Apps only**. On the Apps page an Apps-only input opens
+the same options with **Add to favorites**, which returns it to **Auto**. Only **Apps only**
+inputs appear on the Apps page. Visibility and names
 stay in **Settings → Widgets → Inputs**. Each card shows its port in the corner. A recognized console gives the card its name, brand mark and official
 colour: Xbox (#107C10), Nintendo Switch (#E60012) or PlayStation (#003791). Recognition reads what the source reports
 about itself in `getAllInputStatus`: the HDMI SPD InfoFrame vendor/product and CEC OSD name fields

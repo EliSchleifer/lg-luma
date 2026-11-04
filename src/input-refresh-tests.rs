@@ -426,20 +426,55 @@ fn inputs_lead_the_home_strip_and_follow_the_console_on_a_shared_port() {
 }
 
 #[test]
-fn input_cards_launch_but_cannot_be_reordered_or_opened_as_apps() {
+fn holding_an_input_card_opens_options_to_remove_it_from_favorites() {
+    use crate::state::Effect;
     let mut state = ready();
     let id = state.inventory.inputs[0].id.clone();
+    let next = state.inventory.inputs[1].id.clone();
     state.focus = Target::App(id.clone());
+    // OK still opens the input; holding opens options instead of reordering.
+    assert_eq!(state.activate(), vec![Effect::Launch(id.clone())]);
     state.hold();
     assert!(state.moving.is_none());
-    state.options();
+    assert!(matches!(&state.overlay, Some(Overlay::Options { id: current, .. }) if current == &id));
+    assert_eq!(state.focus, Target::OpenApp);
+    // Inputs offer Open and the favorites toggle only: no hide or delete.
+    let targets: Vec<_> = controls(&state).into_iter().map(|c| c.target).collect();
+    assert!(targets.contains(&Target::OpenApp) && targets.contains(&Target::Option(0)));
+    assert!(!targets.contains(&Target::Option(1)) && !targets.contains(&Target::Option(2)));
+    state.focus = Target::Option(1);
+    assert!(state.activate().is_empty(), "hide does nothing for inputs");
+    state.focus = Target::Option(0);
+    assert_eq!(state.activate(), vec![Effect::Save]);
+    assert_eq!(state.preferences.input_modes[&id], InputMode::Apps);
     assert!(state.overlay.is_none());
-    assert_eq!(
-        state.activate(),
-        vec![crate::state::Effect::Launch(id.clone())]
-    );
-    state.open(1);
     assert!(!state.apps().iter().any(|app| app.id == id));
+    assert_eq!(
+        state.focus,
+        Target::App(next),
+        "focus moves to the card that took its slot"
+    );
+
+    // On the Apps page it opens options like any app, and can be added back.
+    state.open(1);
+    assert_eq!(state.apps()[0].id, id);
+    state.focus = Target::App(id.clone());
+    state.activate();
+    assert_eq!(state.focus, Target::OpenApp);
+    state.focus = Target::Option(0);
+    assert_eq!(state.activate(), vec![Effect::Save]);
+    assert_eq!(state.preferences.input_modes[&id], InputMode::Auto);
+    assert!(!state.apps().iter().any(|app| app.id == id));
+    state.open(0);
+    assert_eq!(
+        state.apps()[0].id,
+        id,
+        "back at the front of the Home strip"
+    );
+    // Open from the options launches the input.
+    state.focus = Target::App(id.clone());
+    state.options();
+    assert_eq!(state.activate(), vec![Effect::Launch(id)]);
 }
 
 #[test]
@@ -472,13 +507,6 @@ fn apps_only_inputs_skip_home_and_list_on_the_apps_page_while_live() {
         id,
         "live Apps-only inputs lead the All tab"
     );
-    state.focus = Target::App(id.clone());
-    assert_eq!(
-        state.activate(),
-        vec![crate::state::Effect::Launch(id.clone())],
-        "an input on the Apps page opens the input instead of app options"
-    );
-    assert!(state.overlay.is_none());
     // Category tabs list apps only; search matches the card title.
     state.filter = 1;
     assert!(!state.apps().iter().any(|app| app.id == id));
