@@ -529,4 +529,59 @@ fn apps_only_inputs_skip_home_and_list_on_the_apps_page_while_live() {
     let saved = serde_json::to_string(&state.preferences).unwrap();
     let loaded: Preferences = serde_json::from_str(&saved).unwrap();
     assert_eq!(loaded.input_modes[&id], InputMode::Apps);
+
+    // Builds before Apps only parse input_modes as Auto, On or Off and refuse the whole file
+    // otherwise. They must still read it, and keep the input off the Home strip.
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    enum OlderMode {
+        Auto,
+        On,
+        Off,
+    }
+    #[derive(serde::Deserialize)]
+    struct OlderPreferences {
+        input_modes: std::collections::BTreeMap<String, OlderMode>,
+    }
+    let older: OlderPreferences = serde_json::from_str(&saved).expect("older builds read it");
+    assert_eq!(older.input_modes[&id], OlderMode::Off);
+}
+
+#[test]
+fn input_modes_read_older_newer_and_unknown_values() {
+    let preferences: Preferences = serde_json::from_value(serde_json::json!({
+        "input_modes": {
+            "com.webos.app.hdmi1": "On",
+            // Written by builds that stored Apps only inline.
+            "com.webos.app.hdmi2": "Apps",
+            "com.webos.app.hdmi3": "Off",
+            "com.webos.app.hdmi4": "SomethingNewer",
+        },
+        "apps_only_inputs": ["com.webos.app.hdmi3", "com.webos.app.hdmi1"],
+        "show_home_names": true,
+    }))
+    .unwrap();
+    assert_eq!(
+        preferences.input_modes["com.webos.app.hdmi1"],
+        InputMode::On
+    );
+    assert_eq!(
+        preferences.input_modes["com.webos.app.hdmi2"],
+        InputMode::Apps
+    );
+    assert_eq!(
+        preferences.input_modes["com.webos.app.hdmi3"],
+        InputMode::Apps
+    );
+    assert!(!preferences.input_modes.contains_key("com.webos.app.hdmi4"));
+    assert!(preferences.show_home_names, "other fields still load");
+
+    let saved = serde_json::to_value(&preferences).unwrap();
+    assert_eq!(saved["input_modes"]["com.webos.app.hdmi2"], "Off");
+    assert_eq!(
+        saved["apps_only_inputs"],
+        serde_json::json!(["com.webos.app.hdmi2", "com.webos.app.hdmi3"])
+    );
+    let empty = serde_json::to_value(Preferences::default()).unwrap();
+    assert_eq!(empty["input_modes"], serde_json::json!({}));
+    assert!(empty.get("apps_only_inputs").is_none());
 }

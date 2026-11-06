@@ -1649,7 +1649,12 @@ fn library_grid(out: &mut Scene, state: &State, assets: &Assets) {
             + if names {
                 18.4 + row
                     .iter()
-                    .map(|app| caption_height(state, assets, app, 270.))
+                    .map(|app| {
+                        // Input cards caption their face title (custom or console name), not
+                        // the port, as `tile` draws them.
+                        let face = state.input_app(&app.id);
+                        caption_height(state, assets, face.as_ref().unwrap_or(app), 270.)
+                    })
                     .fold(58.24, f32::max)
             } else {
                 0.

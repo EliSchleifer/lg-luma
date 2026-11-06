@@ -170,6 +170,84 @@ pub enum InputMode {
     Apps,
 }
 
+/// How `Preferences::input_modes` is stored. Builds before Apps only parse `input_modes` as
+/// Auto, On or Off and reject the whole preferences file on any other value, which would stop
+/// them from starting. Apps-only inputs are therefore saved as Off there, which older builds
+/// keep off the Home strip, and listed separately in `apps_only_inputs`, a field older builds
+/// ignore. Reading accepts both forms and skips values it does not know.
+mod input_modes_file {
+    use super::InputMode;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    #[derive(Serialize)]
+    struct Saved<'a> {
+        input_modes: BTreeMap<&'a str, InputMode>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        apps_only_inputs: Vec<&'a str>,
+    }
+
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct Loaded {
+        input_modes: BTreeMap<String, serde_json::Value>,
+        apps_only_inputs: Vec<serde_json::Value>,
+    }
+
+    pub fn serialize<S: Serializer>(
+        modes: &BTreeMap<String, InputMode>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        Saved {
+            input_modes: modes
+                .iter()
+                .map(|(id, mode)| {
+                    let mode = if *mode == InputMode::Apps {
+                        InputMode::Off
+                    } else {
+                        *mode
+                    };
+                    (id.as_str(), mode)
+                })
+                .collect(),
+            apps_only_inputs: modes
+                .iter()
+                .filter(|(_, mode)| **mode == InputMode::Apps)
+                .map(|(id, _)| id.as_str())
+                .collect(),
+        }
+        .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<String, InputMode>, D::Error> {
+        let loaded = Loaded::deserialize(deserializer).unwrap_or_default();
+        let mut modes: BTreeMap<String, InputMode> = loaded
+            .input_modes
+            .into_iter()
+            .filter_map(|(id, mode)| {
+                let mode = match mode.as_str()? {
+                    "Auto" => InputMode::Auto,
+                    "On" => InputMode::On,
+                    "Off" => InputMode::Off,
+                    "Apps" => InputMode::Apps,
+                    _ => return None,
+                };
+                Some((id, mode))
+            })
+            .collect();
+        for id in loaded.apps_only_inputs {
+            let Some(id) = id.as_str() else { continue };
+            // Saved alongside these inputs as Off; any other mode was set since and wins.
+            if matches!(modes.get(id), None | Some(InputMode::Off)) {
+                modes.insert(id.to_owned(), InputMode::Apps);
+            }
+        }
+        Ok(modes)
+    }
+}
+
 /// POST is the default because Home Assistant webhooks accept only POST and PUT
 /// unless GET is enabled on the trigger.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -298,6 +376,9 @@ pub struct Preferences {
     pub show_greeting: bool,
     pub show_date: bool,
     pub date_format: DateFormat,
+    /// Saved through `input_modes_file`: Apps only is stored apart from the modes older
+    /// builds know, so those builds can still read the file.
+    #[serde(flatten, with = "input_modes_file")]
     pub input_modes: BTreeMap<String, InputMode>,
     /// Custom names by input app ID; the TV's port and label stay visible as detail.
     pub input_names: BTreeMap<String, String>,
