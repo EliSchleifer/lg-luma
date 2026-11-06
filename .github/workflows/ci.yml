@@ -11,8 +11,9 @@ run-name: "${{ github.event_name == 'workflow_dispatch' && format('Branch valida
 #
 # Every job runs on Trunk runners (template .trunk/templates/ci.yaml, slug "ci"), whose image is
 # built from this file's toolchain versions by .trunk/templates/ci.build.sh. Trunk runners run only
-# code from this repository, so no job runs for a pull request from a fork; such a PR is validated
-# when a maintainer queues it, because Trunk Merge Queue runs this workflow on its own branches.
+# code from this repository, so a pull request from a fork runs the same jobs on GitHub-hosted
+# ubuntu-24.04 runners instead (each job's runs-on picks the runner). Every step installs its own
+# toolchains and packages, so the jobs work on either runner.
 on:
   pull_request:
   merge_group:
@@ -35,8 +36,8 @@ jobs:
   # Trunk is unreachable, there is no verdict and every job runs.
   dynamic-ci:
     name: Dynamic CI
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: trunk=${{ github.run_id }}-${{ github.run_attempt }}..size=medium..memory=high..template=ci
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-24.04' || format('trunk={0}-{1}..size=medium..memory=high..template=ci', github.run_id, github.run_attempt) }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -61,10 +62,7 @@ jobs:
   # shared build outputs.
   prepare:
     name: Checks, unit tests, and shared desktop assets
-    # Trunk runners run only code from this repository: skip pull requests from forks.
-    # smoke and package need prepare, so they are skipped too.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: trunk=${{ github.run_id }}-${{ github.run_attempt }}..size=medium..memory=high..template=ci
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-24.04' || format('trunk={0}-{1}..size=medium..memory=high..template=ci', github.run_id, github.run_attempt) }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -118,7 +116,7 @@ jobs:
       !cancelled() &&
       needs.prepare.result == 'success' &&
       needs.dynamic-ci.outputs.smoke != 'false'
-    runs-on: trunk=${{ github.run_id }}-${{ github.run_attempt }}..size=medium..memory=high..template=ci
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-24.04' || format('trunk={0}-{1}..size=medium..memory=high..template=ci', github.run_id, github.run_attempt) }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -181,7 +179,7 @@ jobs:
       !cancelled() &&
       needs.prepare.result == 'success' &&
       needs.dynamic-ci.outputs.package != 'false'
-    runs-on: trunk=${{ github.run_id }}-${{ github.run_attempt }}..size=medium..memory=high..template=ci
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-24.04' || format('trunk={0}-{1}..size=medium..memory=high..template=ci', github.run_id, github.run_attempt) }}
     timeout-minutes: 30
     outputs:
       tag: ${{ steps.package.outputs.tag }}
@@ -235,8 +233,8 @@ jobs:
     # with Dynamic CI: it is the fan-in that reports the required check.
     name: Rust checks, rendering, and native package
     needs: [dynamic-ci, prepare, smoke, package]
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: trunk=${{ github.run_id }}-${{ github.run_attempt }}..size=medium..memory=high..template=ci
+    if: always()
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-24.04' || format('trunk={0}-{1}..size=medium..memory=high..template=ci', github.run_id, github.run_attempt) }}
     timeout-minutes: 5
     steps:
       - name: Require all validation jobs to pass
@@ -266,9 +264,9 @@ jobs:
 
   summary:
     name: Validation summary
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: always()
     needs: [dynamic-ci, prepare, smoke, package, build]
-    runs-on: trunk=${{ github.run_id }}-${{ github.run_attempt }}..size=medium..memory=high..template=ci
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-24.04' || format('trunk={0}-{1}..size=medium..memory=high..template=ci', github.run_id, github.run_attempt) }}
     timeout-minutes: 5
     steps:
       - name: Summarize validation
