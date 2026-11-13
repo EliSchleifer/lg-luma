@@ -73,10 +73,6 @@ pub enum Draw {
     Camera(Arc<crate::cameras::Frame>, Rect, f32, bool, Color),
     Clip(Option<Rect>),
     EdgeFade(Option<[f32; 4]>),
-    /// Horizontal counterpart: [left fade-in start, end, right fade-out start, end].
-    /// Unused since Home favourites became a wrapping grid; kept for horizontal rows.
-    #[allow(dead_code)]
-    EdgeFadeX(Option<[f32; 4]>),
 }
 
 struct Texture {
@@ -210,8 +206,8 @@ enum BatchKind {
 struct Batch {
     kind: BatchKind,
     clip: Option<Rect>,
-    // [top fade-in, top end, bottom start, bottom fade-out, left ×2, right ×2]; 0 = off.
-    fade: Option<[f32; 8]>,
+    // [top fade-in, top end, bottom start, bottom fade-out]; 0 = off.
+    fade: Option<[f32; 4]>,
 }
 
 fn full_screen(rect: &Rect) -> bool {
@@ -302,7 +298,7 @@ fn profile_skip(command: &Draw) -> bool {
         Draw::RoundedGradient(..) => "gradient",
         Draw::Shadow(..) => "shadow",
         Draw::Text(..) => "text",
-        Draw::Clip(_) | Draw::EdgeFade(_) | Draw::EdgeFadeX(_) => return false,
+        Draw::Clip(_) | Draw::EdgeFade(_) => return false,
     };
     skip.iter().any(|entry| entry == kind || entry == "all")
 }
@@ -349,20 +345,14 @@ pub struct Renderer {
     vertices: Vec<f32>,
     batches: Vec<Batch>,
     clip: Option<Rect>,
-    // [top fade-in, top end, bottom start, bottom fade-out, left ×2, right ×2]; 0 = off.
-    fade: Option<[f32; 8]>,
+    // [top fade-in, top end, bottom start, bottom fade-out]; 0 = off.
+    fade: Option<[f32; 4]>,
     frame: u64,
     stats: RenderStats,
     pub info: GraphicsInfo,
 }
 
 impl Renderer {
-    fn set_fade(&mut self, offset: usize, fade: Option<[f32; 4]>) {
-        let mut next = self.fade.unwrap_or([0.; 8]);
-        next[offset..offset + 4].copy_from_slice(&fade.unwrap_or([0.; 4]));
-        self.fade = (next != [0.; 8]).then_some(next);
-    }
-
     pub fn new(font: &Path, gles: bool, text_embolden: f32) -> Result<Self, String> {
         let directory = font.parent().ok_or("Invalid font path")?;
         let mut fonts = HashMap::new();
@@ -1283,8 +1273,7 @@ impl Renderer {
                     self.camera_image(frame, *rect, *radius, *contain, *tint)
                 }
                 Draw::Clip(clip) => self.clip = *clip,
-                Draw::EdgeFade(fade) => self.set_fade(0, *fade),
-                Draw::EdgeFadeX(fade) => self.set_fade(4, *fade),
+                Draw::EdgeFade(fade) => self.fade = *fade,
             }
         }
         // A full scene shows every camera on screen: free the textures of the others.
@@ -1423,7 +1412,7 @@ impl Renderer {
                 if current_fade != Some(batch.fade) {
                     // The same cheap alpha mask applies to shapes, textures,
                     // icons and text; the unmasked wallpaper remains beneath.
-                    let fade = batch.fade.unwrap_or([0.; 8]);
+                    let fade = batch.fade.unwrap_or([0.; 4]);
                     for program in [self.program, self.vector_program, self.text_program] {
                         gl::UseProgram(program);
                         gl::Uniform4f(
@@ -1432,13 +1421,6 @@ impl Renderer {
                             fade[1],
                             fade[2],
                             fade[3],
-                        );
-                        gl::Uniform4f(
-                            gl::GetUniformLocation(program, c"u_edge_fade_x".as_ptr()),
-                            fade[4],
-                            fade[5],
-                            fade[6],
-                            fade[7],
                         );
                     }
                     current_fade = Some(batch.fade);

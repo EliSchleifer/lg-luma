@@ -272,7 +272,7 @@ impl Scene {
                         [brightness, brightness, brightness, alpha],
                     );
                 }
-                Draw::Clip(_) | Draw::EdgeFade(_) | Draw::EdgeFadeX(_) => {}
+                Draw::Clip(_) | Draw::EdgeFade(_) => {}
             }
         }
     }
