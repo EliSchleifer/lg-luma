@@ -130,11 +130,35 @@ h1 {
   color: rgba(245, 245, 245, 0.72);
 }
 
-.hint {
-  flex: none;
-  margin-left: 16px;
-  font-size: 18px;
-  color: rgba(245, 245, 245, 0.56);
+/* OK on a card: the camera alone, full screen. */
+.card.expanded {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: auto;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+  box-shadow: none;
+}
+
+.card.expanded .frame {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  padding-top: 0;
+}
+
+.card.expanded .frame img {
+  object-fit: contain;
+}
+
+.card.expanded header,
+.card.expanded .progress {
+  display: none;
 }
 
 .progress {

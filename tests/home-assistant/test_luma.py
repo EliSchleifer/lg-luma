@@ -175,6 +175,7 @@ async def test_show_camera_sends_signed_proxy_urls_and_options(
         "position": "bottom-left",
         "size": "medium",
         "pause": True,
+        "camera": "camera.front_door",
     }
 
     # Snapshot mode with a go2rtc URL and an explicit title.

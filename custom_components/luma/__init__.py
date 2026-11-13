@@ -301,6 +301,8 @@ def overlay_payload(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]
         "position": data["position"],
         "size": data["size"],
         "pause": data["pause"],
+        # OK on the card opens this camera in Luma's Cameras app.
+        "camera": data.get(ATTR_CAMERA),
     }
     return {key: value for key, value in payload.items() if value is not None}
 

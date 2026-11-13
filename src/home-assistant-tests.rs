@@ -41,6 +41,9 @@ impl Tv for Recorder {
         self.record(format!("toast {message}"));
         Ok(())
     }
+    fn hls_address(&self, endpoint: &str) -> Result<String, String> {
+        Ok(format!("resolved {endpoint}"))
+    }
 }
 
 const LAN: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
@@ -875,4 +878,81 @@ fn camera_video_plays_in_the_overlay_and_reports_how_it_closed() {
     h.api.overlay_ready.store(false, Ordering::Release);
     h.api.show_video("http://ha/x.m3u8", "Door", h.now);
     assert_eq!(h.events.try_recv(), Ok(Event::VideoClosed { failed: true }));
+}
+
+#[test]
+fn ok_on_a_doorbell_card_plays_its_camera_full_screen_in_the_same_session() {
+    let mut h = Harness::new();
+    let token = h.pair();
+    let list = json!({"cameras": [{
+        "id": "camera.door",
+        "name": "Door",
+        "stream_url": "http://ha/stream",
+        "hls_url": "http://ha/api/luma/stream/camera.door?token=t",
+    }]});
+    assert_eq!(
+        h.call("POST", "/api/cameras", Some(&token), list).status,
+        200
+    );
+    *h.tv.playing.lock().unwrap() = Some("_media1".into());
+    let mut body = camera();
+    body["pause"] = json!(true);
+    body["camera"] = json!("camera.door");
+    let reply = h.call("POST", "/api/overlay", Some(&token), body);
+    assert_eq!(reply.status, 200, "{:?}", reply.body);
+    let launches = |h: &Harness| -> Vec<Value> {
+        h.tv.calls()
+            .iter()
+            .filter_map(|call| call.strip_prefix("launch "))
+            .map(|params| serde_json::from_str(params).unwrap())
+            .collect()
+    };
+    let params = launches(&h)[0].clone();
+    let report = |h: &mut Harness, path: &str, nonce: &Value| {
+        let body = json!({"session": params["session"], "nonce": nonce}).to_string();
+        h.api.handle(
+            &Request {
+                method: "POST",
+                path,
+                authorization: None,
+                origin: Some("null"),
+                peer: LOOPBACK,
+                body: body.as_bytes(),
+            },
+            h.now,
+        )
+    };
+    assert_eq!(
+        report(&mut h, "/api/overlay/expand", &json!("x")).body["expanded"],
+        false
+    );
+    assert_eq!(
+        report(&mut h, "/api/overlay/expand", &params["nonce"]).body["expanded"],
+        true
+    );
+    // Home Assistant starts the stream on another thread; the overlay is relaunched with it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while launches(&h).len() < 2 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+        h.api.tick(h.now);
+    }
+    let video = launches(&h)[1].clone();
+    assert_eq!(video["mode"], "video");
+    assert_eq!(video["expanded"], true);
+    assert_eq!(video["session"], params["session"]);
+    assert_eq!(video["nonce"], params["nonce"]);
+    assert_eq!(video["title"], "Front door");
+    assert_eq!(
+        video["url"],
+        "resolved http://ha/api/luma/stream/camera.door?token=t"
+    );
+    // Expanded, the card no longer times out; Back resumes the paused media as before.
+    h.now += Duration::from_secs(600);
+    h.api.tick(h.now);
+    assert!(!h.tv.calls().iter().any(|call| call.starts_with("resume")));
+    assert_eq!(
+        report(&mut h, "/api/overlay/closed", &params["nonce"]).body["ended"],
+        true
+    );
+    assert!(h.tv.calls().iter().any(|call| call == "resume _media1"));
 }

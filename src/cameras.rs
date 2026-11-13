@@ -282,6 +282,11 @@ impl Drop for Service {
 }
 
 /// The absolute address of the HLS playlist the integration's endpoint started.
+/// Starts a camera's HLS stream through the integration's endpoint; its playlist address.
+pub fn resolve_hls(endpoint: &str) -> Result<String, String> {
+    hls_address(&agent(), endpoint)
+}
+
 fn hls_address(agent: &ureq::Agent, endpoint: &str) -> Result<String, String> {
     let bytes = fetch(agent, endpoint)?;
     let reply: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;

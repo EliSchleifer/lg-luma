@@ -13,8 +13,9 @@ Assistant calls the TV; the TV never needs your Home Assistant password.
 ## What you get
 
 - **`luma.show_camera`**: a camera card in a corner of the screen with a title, an optional second
-  line and a countdown. **Back** on the remote closes it early; otherwise it closes after its
-  duration. Choose whether the show keeps playing underneath or pauses until the card closes.
+  line and a countdown. **OK** on the remote shows the camera full screen, as live video when
+  Home Assistant can stream it; **Back** closes it; otherwise it closes after its duration.
+  Choose whether the show keeps playing underneath or pauses until the card closes.
 - **`luma.dismiss`** and a **Dismiss overlay** button: close the card from Home Assistant, for
   example when the door opens.
 - **`luma.notify`** and a **Toast** notify entity: a standard webOS toast over any app.
@@ -165,7 +166,11 @@ entity before `luma.show_camera`.
 
 ## While the card is showing
 
-The card has key focus, so **Back** closes it. Other remote keys, such as play/pause, may not reach
+The card has key focus, so **Back** closes it and **OK** shows the camera full screen. Full screen,
+the camera stays until **Back** or **OK** closes it, with the camera's own feed at first. For a
+`camera` entity whose stream Home Assistant can play (the Cameras app's **Live video**), Luma then
+starts that HLS stream and the full-frame-rate video replaces the feed once it plays. A paused show
+resumes when the camera closes. Other remote keys, such as play/pause, may not reach
 the app underneath until it closes. How webOS routes keys to overlay windows depends on firmware.
 
 ## Security
