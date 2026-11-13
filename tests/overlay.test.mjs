@@ -7,7 +7,7 @@ import { parse } from 'acorn';
 const source = await readFile(new URL('../overlay/logic.js', import.meta.url), 'utf8');
 const context = { window: {} };
 vm.runInNewContext(source, context);
-const { settings, video, frameUrl, closedUrl } = context.window.LumaOverlay;
+const { settings, video, frameUrl, closedUrl, expandUrl } = context.window.LumaOverlay;
 // Values built inside the VM have its own Object prototype; compare them as plain JSON.
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
@@ -65,6 +65,7 @@ test('snapshot frames bypass caches and closing reports to Luma on the TV', () =
   assert.equal(frameUrl('http://ha/s.jpg', 5), 'http://ha/s.jpg?_luma=5');
   assert.equal(frameUrl('http://ha/s.jpg?token=a', 5), 'http://ha/s.jpg?token=a&_luma=5');
   assert.equal(closedUrl(5862), 'http://127.0.0.1:5862/api/overlay/closed');
+  assert.equal(expandUrl(5862), 'http://127.0.0.1:5862/api/overlay/expand');
 });
 
 test('the overlay app keeps the foreground app playing and stays out of app lists', async () => {

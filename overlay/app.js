@@ -2,7 +2,8 @@
 // playing. Luma launches (or relaunches) it with the camera details as launch parameters and
 // shows one doorbell-style card, or (mode "video") an enlarged camera from Luma's Cameras app as
 // Home Assistant's HLS video, full screen, decoded by the TV. A card given an HLS playlist plays
-// it too, muted, over its motion-JPEG feed once the video is playing.
+// it too, muted, over its motion-JPEG feed once the video is playing. OK on a card expands it to
+// full screen, video and all, and stops its countdown.
 (function () {
   'use strict';
   var logic = window.LumaOverlay;
@@ -22,6 +23,8 @@
   var video = null;
   var cardPlayback = null;
   var current = null;
+  var expanded = false;
+  var countdown = null;
   var timers = [];
   var feedTimer = null;
   // Bumped by stopFeed, so snapshot frames still loading from an earlier feed are dropped.
@@ -49,6 +52,8 @@
   }
 
   function clearTimers() {
+    clearTimeout(countdown);
+    countdown = null;
     timers.forEach(function (timer) {
       clearTimeout(timer);
       clearInterval(timer);
@@ -65,13 +70,16 @@
   // need no CORS reply; Luma accepts this endpoint only from the TV itself with this nonce.
   // `failed`: a camera video could not play, so the Cameras app keeps its own stream on screen.
   function report(settings, failed) {
+    send(settings, logic.closedUrl(settings && settings.port), { failed: failed === true });
+  }
+
+  function send(settings, url, extra) {
     if (!settings || !settings.session) return;
-    var url = logic.closedUrl(settings.port);
-    var body = JSON.stringify({
-      session: settings.session,
-      nonce: settings.nonce,
-      failed: failed === true,
+    var fields = { session: settings.session, nonce: settings.nonce };
+    Object.keys(extra).forEach(function (key) {
+      fields[key] = extra[key];
     });
+    var body = JSON.stringify(fields);
     try {
       if (navigator.sendBeacon && navigator.sendBeacon(url, body)) return;
     } catch (_error) {
@@ -91,6 +99,7 @@
     stopFeed();
     stopCardVideo();
     card.hidden = true;
+    expanded = false;
     stopVideo();
     report(current, failed);
     closeTimer = setTimeout(function () {
@@ -339,12 +348,23 @@
     );
   }
 
+  // OK on a card: the camera full screen, its video (or feed) as it was, until Back or OK. Luma
+  // hears so the session outlives the card's duration.
+  function expand() {
+    expanded = true;
+    clearTimeout(countdown);
+    countdown = null;
+    card.classList.add('expanded');
+    send(current, logic.expandUrl(current.port), {});
+  }
+
   function show(settings) {
     cancelClose();
     clearTimers();
     stopCardVideo();
     stopVideo();
     closing = false;
+    expanded = false;
     current = settings;
     card.className = 'card ' + settings.position + ' ' + settings.size;
     document.getElementById('title').textContent = settings.title;
@@ -360,7 +380,9 @@
     bar.style.transition = 'transform ' + settings.duration + 's linear';
     bar.style.transform = 'scaleX(0)';
     card.hidden = false;
-    timers.push(setTimeout(dismiss, settings.duration * 1000));
+    countdown = setTimeout(function () {
+      dismiss();
+    }, settings.duration * 1000);
   }
 
   function apply(params) {
@@ -379,11 +401,16 @@
 
   document.addEventListener('keydown', function (event) {
     // 461 is the webOS remote's Back key; Escape helps when testing in a desktop browser.
-    // OK also closes a camera video, as it does an enlarged camera in Luma.
-    var enlarged = !videoView.hidden;
-    if (event.keyCode === 461 || event.keyCode === 27 || (enlarged && event.keyCode === 13)) {
+    // OK also closes a camera video, as it does an enlarged camera in Luma. On a doorbell card,
+    // OK first shows it full screen.
+    var ok = event.keyCode === 13;
+    var full = !videoView.hidden || expanded;
+    if (event.keyCode === 461 || event.keyCode === 27 || (full && ok)) {
       event.preventDefault();
       dismiss();
+    } else if (ok && !card.hidden) {
+      event.preventDefault();
+      expand();
     }
   });
   window.addEventListener('pagehide', function () {

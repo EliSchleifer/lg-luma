@@ -940,3 +940,53 @@ fn camera_video_plays_in_the_overlay_and_reports_how_it_closed() {
     h.api.show_video("http://ha/x.m3u8", "Door", h.now);
     assert_eq!(h.events.try_recv(), Ok(Event::VideoClosed { failed: true }));
 }
+
+#[test]
+fn ok_on_a_doorbell_card_keeps_it_full_screen_until_closed() {
+    let mut h = Harness::new();
+    let token = h.pair();
+    *h.tv.playing.lock().unwrap() = Some("_media1".into());
+    let mut body = camera();
+    body["pause"] = json!(true);
+    let reply = h.call("POST", "/api/overlay", Some(&token), body);
+    assert_eq!(reply.status, 200, "{:?}", reply.body);
+    let launch =
+        h.tv.calls()
+            .into_iter()
+            .find_map(|call| call.strip_prefix("launch ").map(str::to_owned))
+            .unwrap();
+    let params: Value = serde_json::from_str(&launch).unwrap();
+    let report = |h: &mut Harness, path: &str, peer, nonce: &Value| {
+        let body = json!({"session": params["session"], "nonce": nonce}).to_string();
+        h.api.handle(
+            &Request {
+                method: "POST",
+                path,
+                authorization: None,
+                origin: Some("null"),
+                peer,
+                body: body.as_bytes(),
+            },
+            h.now,
+        )
+    };
+    let expand = "/api/overlay/expand";
+    assert_eq!(report(&mut h, expand, LAN, &params["nonce"]).status, 403);
+    assert_eq!(
+        report(&mut h, expand, LOOPBACK, &json!("x")).body["expanded"],
+        false
+    );
+    assert_eq!(
+        report(&mut h, expand, LOOPBACK, &params["nonce"]).body["expanded"],
+        true
+    );
+    // Expanded, the card outlives its duration; closing resumes the paused media as before.
+    h.now += Duration::from_secs(600);
+    h.api.tick(h.now);
+    assert!(!h.tv.calls().iter().any(|call| call.starts_with("resume")));
+    assert_eq!(
+        report(&mut h, "/api/overlay/closed", LOOPBACK, &params["nonce"]).body["ended"],
+        true
+    );
+    assert!(h.tv.calls().iter().any(|call| call == "resume _media1"));
+}

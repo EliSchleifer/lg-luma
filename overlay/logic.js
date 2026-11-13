@@ -61,7 +61,17 @@
     return 'http://127.0.0.1:' + port + '/api/overlay/closed';
   }
 
-  var api = { settings: settings, video: video, frameUrl: frameUrl, closedUrl: closedUrl };
+  function expandUrl(port) {
+    return 'http://127.0.0.1:' + port + '/api/overlay/expand';
+  }
+
+  var api = {
+    settings: settings,
+    video: video,
+    frameUrl: frameUrl,
+    closedUrl: closedUrl,
+    expandUrl: expandUrl,
+  };
   if (typeof module === 'object' && module.exports) module.exports = api;
   root.LumaOverlay = api;
 })(typeof window === 'object' ? window : globalThis);

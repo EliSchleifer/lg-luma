@@ -521,7 +521,7 @@ impl<T: Tv> Api<T> {
         if !companion::local_peer(request.peer) {
             return error(403, "Only devices on the TV's local network may connect");
         }
-        let closed = request.path == "/api/overlay/closed";
+        let closed = matches!(request.path, "/api/overlay/closed" | "/api/overlay/expand");
         // Browsers send Origin; Home Assistant does not. Only the overlay page itself, a local
         // file with the opaque "null" origin, reports back, and only from the TV.
         if request.origin.is_some() && !(closed && request.peer.is_loopback()) {
@@ -547,6 +547,22 @@ impl<T: Tv> Api<T> {
             ),
             ("POST", "/api/pair") => self.pair(&body, now),
             ("POST", "/api/pair/confirm") => self.confirm(&body, now),
+            // OK on a doorbell card: full screen, it stays until the owner closes it.
+            ("POST", "/api/overlay/expand") => {
+                if !request.peer.is_loopback() {
+                    return error(403, "Only the overlay app expands its card");
+                }
+                let session = self.session.as_mut().filter(|session| {
+                    !session.video
+                        && body["session"] == session.id.as_str()
+                        && body["nonce"] == session.nonce.as_str()
+                });
+                let expanded = session.is_some();
+                if let Some(session) = session {
+                    session.ends = now + VIDEO_TTL;
+                }
+                reply(200, json!({"expanded": expanded}))
+            }
             ("POST", "/api/overlay/closed") => {
                 if !request.peer.is_loopback() {
                     return error(403, "Only the overlay app reports closing");
