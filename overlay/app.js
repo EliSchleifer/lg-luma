@@ -1,8 +1,9 @@
 // Luma's camera overlay: a transparent webOS "overlay" window, so the app underneath keeps
 // playing. Luma launches (or relaunches) it with the camera details as launch parameters and
 // shows one doorbell-style card, or (mode "video") an enlarged camera from Luma's Cameras app as
-// Home Assistant's HLS video, full screen, decoded by the TV. OK on a card expands it to full
-// screen; Luma then relaunches the page with that camera's HLS video when it has one.
+// Home Assistant's HLS video, full screen, decoded by the TV. A card given an HLS playlist plays
+// it too, muted, over its motion-JPEG feed once the video is playing. OK on a card expands it to
+// full screen, video and all, and stops its countdown.
 (function () {
   'use strict';
   var logic = window.LumaOverlay;
@@ -14,15 +15,20 @@
   var player = document.getElementById('player');
   var videoStatus = document.getElementById('video-status');
   var videoLive = document.getElementById('video-live');
-  // A video that shows nothing by then gives the screen back to Luma's motion-JPEG stream.
+  var cardVideo = document.getElementById('card-video');
+  // A video that shows nothing by then gives the screen back to the motion-JPEG stream.
   var VIDEO_WAIT_MS = 15000;
-  var hls = null;
+  // A playing video whose picture stops moving this long has stalled for good.
+  var VIDEO_STALL_MS = 10000;
+  var video = null;
+  var cardPlayback = null;
   var current = null;
-  // The doorbell card on screen, kept while its expanded camera's video starts.
-  var shown = null;
   var expanded = false;
   var countdown = null;
   var timers = [];
+  var feedTimer = null;
+  // Bumped by stopFeed, so snapshot frames still loading from an earlier feed are dropped.
+  var feedRun = 0;
   var closing = false;
   var closeTimer = null;
 
@@ -64,12 +70,11 @@
   // need no CORS reply; Luma accepts this endpoint only from the TV itself with this nonce.
   // `failed`: a camera video could not play, so the Cameras app keeps its own stream on screen.
   function report(settings, failed) {
-    send(settings, logic.closedUrl, { failed: failed === true });
+    send(settings, logic.closedUrl(settings && settings.port), { failed: failed === true });
   }
 
-  function send(settings, address, extra) {
+  function send(settings, url, extra) {
     if (!settings || !settings.session) return;
-    var url = address(settings.port);
     var fields = { session: settings.session, nonce: settings.nonce };
     Object.keys(extra).forEach(function (key) {
       fields[key] = extra[key];
@@ -91,9 +96,9 @@
     if (closing) return;
     closing = true;
     clearTimers();
-    feed.removeAttribute('src');
+    stopFeed();
+    stopCardVideo();
     card.hidden = true;
-    shown = null;
     expanded = false;
     stopVideo();
     report(current, failed);
@@ -110,174 +115,31 @@
 
   function snapshots(settings) {
     var loading = false;
+    var run = feedRun;
     function next() {
       if (loading) return;
       loading = true;
       var image = new Image();
       image.onload = function () {
+        if (run !== feedRun) return;
         loading = false;
         feed.src = image.src;
         showStatus('');
       };
       image.onerror = function () {
+        if (run !== feedRun) return;
         loading = false;
         showStatus('Camera unavailable');
       };
       image.src = logic.frameUrl(settings.snapshot, Date.now());
     }
     next();
-    timers.push(setInterval(next, settings.refresh * 1000));
+    feedTimer = setInterval(next, settings.refresh * 1000);
   }
 
-  // ---- Camera video (Cameras app) ----------------------------------------------------------
-
-  function stopVideo() {
-    if (hls) {
-      hls.destroy();
-      hls = null;
-    }
-    player.onplaying = null;
-    player.onerror = null;
-    player.pause();
-    player.removeAttribute('src');
-    try {
-      player.load();
-    } catch (_error) {
-      // Nothing was loading.
-    }
-    videoView.hidden = true;
-    videoView.className = 'video';
-  }
-
-  function start() {
-    var playing = player.play();
-    // Autoplay with sound can be refused; play muted rather than not at all.
-    if (playing && playing.catch) {
-      playing.catch(function () {
-        player.muted = true;
-        player.play();
-      });
-    }
-  }
-
-  function loadHls(done) {
-    if (window.Hls) return done(window.Hls);
-    var script = document.createElement('script');
-    script.src = 'vendor/hls.light.min.js';
-    script.onload = function () {
-      done(window.Hls);
-    };
-    script.onerror = function () {
-      done(null);
-    };
-    document.head.appendChild(script);
-  }
-
-  // hls.js plays HLS through Media Source Extensions where the TV's own player cannot.
-  function playWithHlsJs(settings) {
-    loadHls(function (Hls) {
-      if (closing || current !== settings) return;
-      if (!Hls || !Hls.isSupported()) {
-        videoFailed(settings);
-        return;
-      }
-      player.removeAttribute('src');
-      hls = new Hls({ lowLatencyMode: true, backBufferLength: 10 });
-      hls.on(Hls.Events.ERROR, function (_event, data) {
-        if (data && data.fatal) videoFailed(settings);
-      });
-      hls.on(Hls.Events.MANIFEST_PARSED, start);
-      hls.loadSource(settings.url);
-      hls.attachMedia(player);
-    });
-  }
-
-  // The camera's own feed full screen: OK on a doorbell card. The countdown stops, and Luma
-  // looks for the camera's HLS video meanwhile.
-  function expand() {
-    expanded = true;
-    clearTimeout(countdown);
-    countdown = null;
-    card.className = 'card expanded';
-    send(current, logic.expandUrl, {});
-  }
-
-  // An expanded card's video that cannot play leaves its full-screen feed on screen.
-  function videoFailed(settings) {
-    if (!settings.expanded || !shown) {
-      dismiss(true);
-      return;
-    }
-    var doorbell = shown;
-    clearTimers();
-    stopVideo();
-    show(doorbell, true);
-  }
-
-  function playVideo(settings) {
-    cancelClose();
-    // An expanded card stays on screen, feed running, until the video plays over it.
-    var keepCard = settings.expanded && expanded && shown && !card.hidden;
-    if (!keepCard) {
-      clearTimers();
-      card.hidden = true;
-      shown = null;
-      expanded = false;
-    }
-    stopVideo();
-    closing = false;
-    current = settings;
-    document.getElementById('video-title').textContent = settings.title;
-    videoStatus.hidden = false;
-    videoLive.hidden = true;
-    videoView.hidden = false;
-    var playing = false;
-    // The expanded card's own badge stays until then.
-    videoStatus.hidden = keepCard;
-    player.onplaying = function () {
-      playing = true;
-      videoView.className = 'video playing';
-      videoStatus.hidden = true;
-      videoLive.hidden = false;
-      if (!card.hidden) {
-        clearTimers();
-        feed.removeAttribute('src');
-        card.hidden = true;
-      }
-    };
-    timers.push(
-      setTimeout(function () {
-        if (!playing) videoFailed(settings);
-      }, VIDEO_WAIT_MS)
-    );
-    // The TV's own player first, where it says it plays HLS; hls.js otherwise or if it fails.
-    var native = player.canPlayType && player.canPlayType('application/vnd.apple.mpegurl');
-    if (native) {
-      player.onerror = function () {
-        player.onerror = null;
-        if (playing) videoFailed(settings);
-        else playWithHlsJs(settings);
-      };
-      player.src = settings.url;
-      start();
-    } else {
-      playWithHlsJs(settings);
-    }
-  }
-
-  function show(settings, full) {
-    cancelClose();
-    clearTimers();
-    stopVideo();
-    closing = false;
-    current = settings;
-    shown = settings;
-    expanded = full === true;
-    card.className = expanded ? 'card expanded' : 'card ' + settings.position + ' ' + settings.size;
-    document.getElementById('title').textContent = settings.title;
-    var message = document.getElementById('message');
-    message.textContent = settings.message;
-    message.hidden = !settings.message;
+  // The card's motion-JPEG stream, falling back to snapshots.
+  function startFeed(settings) {
+    stopFeed();
     showStatus('Connecting to camera…');
     feed.onload = function () {
       showStatus('');
@@ -297,6 +159,220 @@
     } else {
       snapshots(settings);
     }
+  }
+
+  function stopFeed() {
+    feedRun += 1;
+    clearInterval(feedTimer);
+    feedTimer = null;
+    feed.onload = null;
+    feed.onerror = null;
+    feed.removeAttribute('src');
+  }
+
+  // ---- HLS video ---------------------------------------------------------------------------
+
+  function start(element) {
+    var playing = element.play();
+    // Autoplay with sound can be refused; play muted rather than not at all.
+    if (playing && playing.catch) {
+      playing.catch(function () {
+        element.muted = true;
+        element.play();
+      });
+    }
+  }
+
+  function loadHls(done) {
+    if (window.Hls) return done(window.Hls);
+    var script = document.createElement('script');
+    script.src = 'vendor/hls.light.min.js';
+    script.onload = function () {
+      done(window.Hls);
+    };
+    script.onerror = function () {
+      done(null);
+    };
+    document.head.appendChild(script);
+  }
+
+  // Plays an HLS playlist in a <video>: the TV's own player first, where it says it plays HLS;
+  // hls.js through Media Source Extensions otherwise or if that fails. `onPlaying` runs once,
+  // when the first frame shows; `onFail(wasPlaying)` once, when it cannot play, ends, stalls for
+  // VIDEO_STALL_MS, or shows nothing within VIDEO_WAIT_MS. `stop()` ends it without calling either.
+  function playHls(element, url, onPlaying, onFail) {
+    var playback = { stopped: false, playing: false, hls: null, wait: null, watch: null };
+    function fail() {
+      if (playback.stopped) return;
+      var wasPlaying = playback.playing;
+      playback.stop();
+      onFail(wasPlaying);
+    }
+    function withHlsJs() {
+      loadHls(function (Hls) {
+        if (playback.stopped) return;
+        if (!Hls || !Hls.isSupported()) {
+          fail();
+          return;
+        }
+        element.removeAttribute('src');
+        playback.hls = new Hls({ lowLatencyMode: true, backBufferLength: 10 });
+        playback.hls.on(Hls.Events.ERROR, function (_event, data) {
+          if (data && data.fatal) fail();
+        });
+        playback.hls.on(Hls.Events.MANIFEST_PARSED, function () {
+          start(element);
+        });
+        playback.hls.loadSource(url);
+        playback.hls.attachMedia(element);
+      });
+    }
+    playback.stop = function () {
+      playback.stopped = true;
+      clearTimeout(playback.wait);
+      clearInterval(playback.watch);
+      if (playback.hls) {
+        playback.hls.destroy();
+        playback.hls = null;
+      }
+      element.onplaying = null;
+      element.onerror = null;
+      element.onended = null;
+      element.pause();
+      element.removeAttribute('src');
+      try {
+        element.load();
+      } catch (_error) {
+        // Nothing was loading.
+      }
+    };
+    element.onplaying = function () {
+      if (playback.playing) return;
+      playback.playing = true;
+      clearTimeout(playback.wait);
+      // A live stream that stops updating freezes on its last frame without an error event.
+      var position = element.currentTime;
+      var still = 0;
+      playback.watch = setInterval(function () {
+        if (element.currentTime !== position) {
+          position = element.currentTime;
+          still = 0;
+        } else if ((still += 1000) >= VIDEO_STALL_MS) {
+          fail();
+        }
+      }, 1000);
+      onPlaying();
+    };
+    element.onended = fail;
+    playback.wait = setTimeout(function () {
+      if (!playback.playing) fail();
+    }, VIDEO_WAIT_MS);
+    var native = element.canPlayType && element.canPlayType('application/vnd.apple.mpegurl');
+    if (native) {
+      element.onerror = function () {
+        element.onerror = null;
+        if (playback.playing) fail();
+        else withHlsJs();
+      };
+      element.src = url;
+      start(element);
+    } else {
+      withHlsJs();
+    }
+    return playback;
+  }
+
+  // ---- Camera video (Cameras app) ----------------------------------------------------------
+
+  function stopVideo() {
+    if (video) {
+      video.stop();
+      video = null;
+    }
+    videoView.hidden = true;
+    videoView.className = 'video';
+  }
+
+  function playVideo(settings) {
+    cancelClose();
+    clearTimers();
+    stopFeed();
+    stopCardVideo();
+    stopVideo();
+    card.hidden = true;
+    closing = false;
+    current = settings;
+    document.getElementById('video-title').textContent = settings.title;
+    videoStatus.hidden = false;
+    videoLive.hidden = true;
+    videoView.hidden = false;
+    video = playHls(
+      player,
+      settings.url,
+      function () {
+        videoView.className = 'video playing';
+        videoStatus.hidden = true;
+        videoLive.hidden = false;
+      },
+      function () {
+        dismiss(true);
+      }
+    );
+  }
+
+  // ---- Doorbell card -----------------------------------------------------------------------
+
+  function stopCardVideo() {
+    if (cardPlayback) {
+      cardPlayback.stop();
+      cardPlayback = null;
+    }
+    card.classList.remove('playing');
+  }
+
+  // Full-frame-rate video in the card, over the motion-JPEG once it plays. The motion-JPEG stays
+  // connected underneath: its URL's camera token may have rotated by the time a long card's video
+  // fails, so reconnecting then could be refused. A video that fails just uncovers it.
+  function playCardVideo(settings) {
+    cardVideo.muted = true;
+    cardPlayback = playHls(
+      cardVideo,
+      settings.hls,
+      function () {
+        card.classList.add('playing');
+      },
+      function () {
+        cardPlayback = null;
+        card.classList.remove('playing');
+      }
+    );
+  }
+
+  // OK on a card: the camera full screen, its video (or feed) as it was, until Back or OK. Luma
+  // hears so the session outlives the card's duration.
+  function expand() {
+    expanded = true;
+    clearTimeout(countdown);
+    countdown = null;
+    card.classList.add('expanded');
+    send(current, logic.expandUrl(current.port), {});
+  }
+
+  function show(settings) {
+    cancelClose();
+    clearTimers();
+    stopCardVideo();
+    stopVideo();
+    closing = false;
+    expanded = false;
+    current = settings;
+    card.className = 'card ' + settings.position + ' ' + settings.size;
+    document.getElementById('title').textContent = settings.title;
+    var message = document.getElementById('message');
+    message.textContent = settings.message;
+    message.hidden = !settings.message;
+    startFeed(settings);
+    if (settings.hls) playCardVideo(settings);
     // Restart the countdown animation for a replaced overlay.
     bar.style.transition = 'none';
     bar.style.transform = 'scaleX(1)';
@@ -304,17 +380,15 @@
     bar.style.transition = 'transform ' + settings.duration + 's linear';
     bar.style.transform = 'scaleX(0)';
     card.hidden = false;
-    if (!expanded) {
-      countdown = setTimeout(function () {
-        dismiss();
-      }, settings.duration * 1000);
-    }
+    countdown = setTimeout(function () {
+      dismiss();
+    }, settings.duration * 1000);
   }
 
   function apply(params) {
-    var video = logic.video(params);
-    if (video) {
-      playVideo(video);
+    var enlarged = logic.video(params);
+    if (enlarged) {
+      playVideo(enlarged);
       return;
     }
     var settings = logic.settings(params);
@@ -327,8 +401,8 @@
 
   document.addEventListener('keydown', function (event) {
     // 461 is the webOS remote's Back key; Escape helps when testing in a desktop browser.
-    // OK expands a doorbell card to full screen; full screen, it closes, as an enlarged
-    // camera does in Luma.
+    // OK also closes a camera video, as it does an enlarged camera in Luma. On a doorbell card,
+    // OK first shows it full screen.
     var ok = event.keyCode === 13;
     var full = !videoView.hidden || expanded;
     if (event.keyCode === 461 || event.keyCode === 27 || (full && ok)) {

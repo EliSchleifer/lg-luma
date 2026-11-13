@@ -41,9 +41,6 @@ impl Tv for Recorder {
         self.record(format!("toast {message}"));
         Ok(())
     }
-    fn hls_address(&self, endpoint: &str) -> Result<String, String> {
-        Ok(format!("resolved {endpoint}"))
-    }
 }
 
 const LAN: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
@@ -245,6 +242,8 @@ fn overlay_requests_are_validated_before_anything_reaches_the_tv() {
         json!({"snapshot_url":"http://ha/s.jpg","pause":"yes"}),
         json!({"snapshot_url":"http://ha/s.jpg","title":"x".repeat(81)}),
         json!({"snapshot_url":"http://ha/s.jpg","title":"line\nbreak"}),
+        json!({"snapshot_url":"http://ha/s.jpg","hls_url":"javascript:alert(1)"}),
+        json!({"hls_url":"http://ha/api/hls/x/master_playlist.m3u8"}),
     ] {
         let reply = h.call("POST", "/api/overlay", Some(&token), body.clone());
         assert_eq!(reply.status, 400, "{body} → {:?}", reply.body);
@@ -273,7 +272,34 @@ fn showing_launches_the_overlay_with_defaults_and_a_session_nonce() {
     assert_eq!(params["size"], "medium");
     assert_eq!(params["duration"], 30.);
     assert!(params["snapshot"].is_null());
+    assert!(params["hls"].is_null());
     assert!(!h.tv.calls().contains(&"pause".to_owned()));
+}
+
+#[test]
+fn a_card_with_an_hls_playlist_passes_it_to_the_overlay() {
+    let mut h = Harness::new();
+    let token = h.pair();
+    let mut body = camera();
+    body["hls_url"] = json!("http://ha.local:8123/api/hls/abc/master_playlist.m3u8");
+    let reply = h.call("POST", "/api/overlay", Some(&token), body);
+    assert_eq!(reply.status, 200, "{:?}", reply.body);
+    let launch =
+        h.tv.calls()
+            .into_iter()
+            .find_map(|call| call.strip_prefix("launch ").map(str::to_owned))
+            .unwrap();
+    let params: Value = serde_json::from_str(&launch).unwrap();
+    assert_eq!(
+        params["hls"],
+        "http://ha.local:8123/api/hls/abc/master_playlist.m3u8"
+    );
+    // The motion-JPEG stays as the card's picture until the video plays.
+    assert_eq!(
+        params["stream"],
+        "http://ha.local:8123/api/camera_proxy_stream/camera.door?token=abc"
+    );
+    assert!(params.get("mode").is_none());
 }
 
 #[test]
@@ -653,6 +679,8 @@ fn the_gallery_arrangement_is_saved_and_applied_to_later_lists() {
         json!({"order": "camera.a"}),
         json!({"hidden": [3]}),
         json!({"live": "no"}),
+        json!({"names": ["x"]}),
+        json!({"names": {"0/camera.a": 3}}),
     ] {
         assert_eq!(h.api.arrange(&bad).status, 400);
     }
@@ -719,6 +747,34 @@ fn the_gallery_arrangement_is_saved_and_applied_to_later_lists() {
     let gallery = &h.api.store().gallery;
     assert_eq!(gallery.order, ["0/camera.c", "0/camera.a"]);
     assert_eq!(gallery.hidden, ["0/camera.b"]);
+
+    // The owner's names are saved, trimmed, and come back as each camera's label.
+    h.api.arrange(&json!({
+        "order": ["0/camera.c", "0/camera.a", "0/camera.b"],
+        "names": {"0/camera.a": "  Porch ", "0/camera.b": "Garage", "0/camera.c": " "},
+    }));
+    let labels: Vec<_> = h
+        .api
+        .gallery()
+        .into_iter()
+        .map(|camera| (camera.id, camera.label))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            ("0/camera.c".to_owned(), None),
+            ("0/camera.a".to_owned(), Some("Porch".to_owned())),
+            ("0/camera.b".to_owned(), Some("Garage".to_owned())),
+        ]
+    );
+    // A name left out for a reported camera is removed; an unreported camera keeps its own.
+    h.api.arrange(&json!({
+        "order": ["0/camera.c", "0/camera.a"],
+        "names": {},
+    }));
+    let names = &h.api.store().gallery.names;
+    assert_eq!(names.len(), 1);
+    assert_eq!(names["0/camera.b"], "Garage");
 }
 
 #[test]
@@ -736,6 +792,7 @@ fn two_servers_sharing_an_entity_id_are_arranged_separately() {
     h.api.arrange(&json!({
         "order": ["1/camera.door", "0/camera.door"],
         "hidden": ["1/camera.door"],
+        "names": {"0/camera.door": "Front", "1/camera.door": "Back"},
     }));
     let gallery: Vec<_> = h
         .api
@@ -754,6 +811,10 @@ fn two_servers_sharing_an_entity_id_are_arranged_separately() {
     h.call("DELETE", "/api/pair", Some(&first), json!({}));
     assert_eq!(h.api.store().gallery.hidden, ["0/camera.door"]);
     assert_eq!(h.api.store().gallery.order, ["0/camera.door"]);
+    assert_eq!(
+        h.api.store().gallery.names.iter().collect::<Vec<_>>(),
+        [(&"0/camera.door".to_owned(), &"Back".to_owned())]
+    );
     let gallery: Vec<_> = h
         .api
         .gallery()
@@ -881,34 +942,21 @@ fn camera_video_plays_in_the_overlay_and_reports_how_it_closed() {
 }
 
 #[test]
-fn ok_on_a_doorbell_card_plays_its_camera_full_screen_in_the_same_session() {
+fn ok_on_a_doorbell_card_keeps_it_full_screen_until_closed() {
     let mut h = Harness::new();
     let token = h.pair();
-    let list = json!({"cameras": [{
-        "id": "camera.door",
-        "name": "Door",
-        "stream_url": "http://ha/stream",
-        "hls_url": "http://ha/api/luma/stream/camera.door?token=t",
-    }]});
-    assert_eq!(
-        h.call("POST", "/api/cameras", Some(&token), list).status,
-        200
-    );
     *h.tv.playing.lock().unwrap() = Some("_media1".into());
     let mut body = camera();
     body["pause"] = json!(true);
-    body["camera"] = json!("camera.door");
     let reply = h.call("POST", "/api/overlay", Some(&token), body);
     assert_eq!(reply.status, 200, "{:?}", reply.body);
-    let launches = |h: &Harness| -> Vec<Value> {
+    let launch =
         h.tv.calls()
-            .iter()
-            .filter_map(|call| call.strip_prefix("launch "))
-            .map(|params| serde_json::from_str(params).unwrap())
-            .collect()
-    };
-    let params = launches(&h)[0].clone();
-    let report = |h: &mut Harness, path: &str, nonce: &Value| {
+            .into_iter()
+            .find_map(|call| call.strip_prefix("launch ").map(str::to_owned))
+            .unwrap();
+    let params: Value = serde_json::from_str(&launch).unwrap();
+    let report = |h: &mut Harness, path: &str, peer, nonce: &Value| {
         let body = json!({"session": params["session"], "nonce": nonce}).to_string();
         h.api.handle(
             &Request {
@@ -916,42 +964,28 @@ fn ok_on_a_doorbell_card_plays_its_camera_full_screen_in_the_same_session() {
                 path,
                 authorization: None,
                 origin: Some("null"),
-                peer: LOOPBACK,
+                peer,
                 body: body.as_bytes(),
             },
             h.now,
         )
     };
+    let expand = "/api/overlay/expand";
+    assert_eq!(report(&mut h, expand, LAN, &params["nonce"]).status, 403);
     assert_eq!(
-        report(&mut h, "/api/overlay/expand", &json!("x")).body["expanded"],
+        report(&mut h, expand, LOOPBACK, &json!("x")).body["expanded"],
         false
     );
     assert_eq!(
-        report(&mut h, "/api/overlay/expand", &params["nonce"]).body["expanded"],
+        report(&mut h, expand, LOOPBACK, &params["nonce"]).body["expanded"],
         true
     );
-    // Home Assistant starts the stream on another thread; the overlay is relaunched with it.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while launches(&h).len() < 2 && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-        h.api.tick(h.now);
-    }
-    let video = launches(&h)[1].clone();
-    assert_eq!(video["mode"], "video");
-    assert_eq!(video["expanded"], true);
-    assert_eq!(video["session"], params["session"]);
-    assert_eq!(video["nonce"], params["nonce"]);
-    assert_eq!(video["title"], "Front door");
-    assert_eq!(
-        video["url"],
-        "resolved http://ha/api/luma/stream/camera.door?token=t"
-    );
-    // Expanded, the card no longer times out; Back resumes the paused media as before.
+    // Expanded, the card outlives its duration; closing resumes the paused media as before.
     h.now += Duration::from_secs(600);
     h.api.tick(h.now);
     assert!(!h.tv.calls().iter().any(|call| call.starts_with("resume")));
     assert_eq!(
-        report(&mut h, "/api/overlay/closed", &params["nonce"]).body["ended"],
+        report(&mut h, "/api/overlay/closed", LOOPBACK, &params["nonce"]).body["ended"],
         true
     );
     assert!(h.tv.calls().iter().any(|call| call == "resume _media1"));

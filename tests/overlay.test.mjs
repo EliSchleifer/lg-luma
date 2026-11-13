@@ -21,6 +21,7 @@ test('launch parameters get safe defaults and invalid values are replaced', () =
       port: 5862,
       stream: 'http://ha:8123/api/camera_proxy_stream/x?token=t',
       snapshot: null,
+      hls: null,
       refresh: 1,
       duration: 30,
       title: 'Camera',
@@ -44,6 +45,13 @@ test('launch parameters get safe defaults and invalid values are replaced', () =
   assert.equal(odd.position, 'top-right');
   assert.equal(odd.size, 'medium');
   assert.equal(odd.port, 5862);
+});
+
+test('a card may carry an http(s) HLS playlist, but still needs a motion-JPEG or snapshot', () => {
+  const playlist = 'http://ha:8123/api/hls/abc/master_playlist.m3u8';
+  assert.equal(settings({ stream: 'http://ha/s.mjpeg', hls: playlist }).hls, playlist);
+  assert.equal(settings({ stream: 'http://ha/s.mjpeg', hls: 'javascript:alert(1)' }).hls, null);
+  assert.equal(settings({ hls: playlist }), null);
 });
 
 test('an overlay without a camera closes unless it is a dismissal', () => {
@@ -91,12 +99,10 @@ test('a camera video needs an http(s) playlist and keeps its session for reporti
       port: 5862,
       url: 'http://ha:8123/api/hls/x/master_playlist.m3u8',
       title: 'Front door',
-      expanded: false,
     },
   );
   assert.equal(video({ mode: 'video', url: 'javascript:alert(1)' }), null);
   assert.equal(video({ url: 'http://ha/x.m3u8' }), null);
-  assert.equal(video({ mode: 'video', url: 'http://ha/x.m3u8', expanded: true }).expanded, true);
   assert.equal(video(null), null);
 });
 

@@ -27,6 +27,8 @@
       port: clamp(params.port, 1, 65535, 5862),
       stream: stream,
       snapshot: snapshot,
+      // Home Assistant's HLS playlist: full-frame-rate video in the card once it plays.
+      hls: http(params.hls),
       refresh: clamp(params.refresh, 0.25, 30, 1),
       duration: clamp(params.duration, 5, 600, 30),
       title: typeof params.title === 'string' && params.title ? params.title : 'Camera',
@@ -47,8 +49,6 @@
       port: clamp(params.port, 1, 65535, 5862),
       url: url,
       title: typeof params.title === 'string' ? params.title.slice(0, 80) : '',
-      // A doorbell card the owner expanded with OK: its full-screen feed stays until this plays.
-      expanded: params.expanded === true,
     };
   }
 

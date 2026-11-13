@@ -63,8 +63,6 @@ pub trait Tv: Send + Sync + 'static {
     fn pause_media(&self) -> Result<Option<String>, String>;
     fn resume_media(&self, id: &str) -> Result<(), String>;
     fn toast(&self, message: &str) -> Result<(), String>;
-    /// Asks the integration's HLS endpoint to start a camera's stream; its playlist address.
-    fn hls_address(&self, endpoint: &str) -> Result<String, String>;
 }
 
 pub struct Live {
@@ -110,9 +108,6 @@ impl Tv for Live {
             return Ok(());
         }
         crate::platform::toast(message)
-    }
-    fn hls_address(&self, endpoint: &str) -> Result<String, String> {
-        crate::cameras::resolve_hls(endpoint)
     }
 }
 
@@ -169,29 +164,31 @@ pub struct Gallery {
     pub hidden: Vec<String>,
     /// Enlarged cameras poll snapshots instead of opening the motion-JPEG stream.
     pub snapshots: bool,
+    /// The owner's names for cameras, shown instead of Home Assistant's.
+    pub names: std::collections::BTreeMap<String, String>,
 }
 
 impl Gallery {
     /// The server at `index` in pairing order was unpaired: its entries go, and later servers,
     /// which move up one place, keep theirs.
     fn unpaired(&mut self, index: usize) {
-        let renumber = |list: &mut Vec<String>| {
-            *list = list
-                .drain(..)
-                .filter_map(|id| {
-                    let Some((server, entity)) = id.split_once('/') else {
-                        return Some(id);
-                    };
-                    match server.parse::<usize>() {
-                        Ok(server) if server == index => None,
-                        Ok(server) if server > index => Some(format!("{}/{entity}", server - 1)),
-                        _ => Some(id),
-                    }
-                })
-                .collect();
+        // An entry's new ID, or none if it belonged to the unpaired server.
+        let moved = |id: &str| -> Option<String> {
+            let Some((server, entity)) = id.split_once('/') else {
+                return Some(id.into());
+            };
+            match server.parse::<usize>() {
+                Ok(server) if server == index => None,
+                Ok(server) if server > index => Some(format!("{}/{entity}", server - 1)),
+                _ => Some(id.into()),
+            }
         };
-        renumber(&mut self.order);
-        renumber(&mut self.hidden);
+        self.order = self.order.iter().filter_map(|id| moved(id)).collect();
+        self.hidden = self.hidden.iter().filter_map(|id| moved(id)).collect();
+        self.names = std::mem::take(&mut self.names)
+            .into_iter()
+            .filter_map(|(id, name)| Some((moved(&id)?, name)))
+            .collect();
     }
 }
 
@@ -218,8 +215,6 @@ struct Session {
     ends: Instant,
     /// A camera video from the Cameras app rather than a doorbell card.
     video: bool,
-    /// A doorbell card's camera: its HLS endpoint and name, for OK to play full screen.
-    hls: Option<(String, String)>,
 }
 
 pub struct Request<'a> {
@@ -370,9 +365,6 @@ fn choice(body: &Value, key: &str, allowed: &[&'static str]) -> Result<&'static 
     }
 }
 
-/// A doorbell session's HLS address, or why Home Assistant gave none.
-type Resolved = (String, Result<String, String>);
-
 pub struct Api<T: Tv> {
     tv: Arc<T>,
     store: Store,
@@ -385,8 +377,6 @@ pub struct Api<T: Tv> {
     cameras: Vec<(String, Vec<Camera>)>,
     overlay_ready: Arc<AtomicBool>,
     preparing: Arc<AtomicBool>,
-    /// An expanded card's HLS address (session ID, result), resolved on its own thread.
-    resolved: (mpsc::Sender<Resolved>, mpsc::Receiver<Resolved>),
 }
 
 impl<T: Tv> Api<T> {
@@ -412,7 +402,6 @@ impl<T: Tv> Api<T> {
             cameras: Vec::new(),
             overlay_ready: Arc::new(AtomicBool::new(false)),
             preparing: Arc::new(AtomicBool::new(false)),
-            resolved: mpsc::channel(),
         };
         if api.store.device_id.len() != 32 {
             api.store.device_id = random_hex(16)?;
@@ -513,69 +502,8 @@ impl<T: Tv> Api<T> {
         }
     }
 
-    /// OK on a doorbell card: the page went full screen on the camera's motion-JPEG stream, so
-    /// the card no longer times out. A camera with Home Assistant's HLS stream then plays that
-    /// full screen in the same session, so Back still resumes the media the card paused.
-    fn expand(&mut self, body: &Value, now: Instant) -> bool {
-        let Some(session) = self.session.as_mut().filter(|session| {
-            !session.video
-                && body["session"] == session.id.as_str()
-                && body["nonce"] == session.nonce.as_str()
-        }) else {
-            return false;
-        };
-        session.ends = now + VIDEO_TTL;
-        if let Some((endpoint, _)) = session.hls.clone() {
-            let (tv, sender, id) = (self.tv.clone(), self.resolved.0.clone(), session.id.clone());
-            let spawned = thread::Builder::new()
-                .name("doorbell-video".into())
-                .spawn(move || {
-                    let _ = sender.send((id, tv.hls_address(&endpoint)));
-                });
-            if let Err(error) = spawned {
-                eprintln!("Luma Home Assistant video: {error}");
-            }
-        }
-        true
-    }
-
-    /// Plays an expanded card's HLS video once Home Assistant has started the stream. A card
-    /// closed or replaced meanwhile is left alone; without a stream the motion-JPEG one stays.
-    fn play_resolved(&mut self) {
-        while let Ok((id, result)) = self.resolved.1.try_recv() {
-            let Some(session) = self
-                .session
-                .as_ref()
-                .filter(|session| session.id == id && !session.video)
-            else {
-                continue;
-            };
-            let url = match result {
-                Ok(url) => url,
-                Err(error) => {
-                    eprintln!("Luma Home Assistant: no HLS stream for the doorbell: {error}");
-                    continue;
-                }
-            };
-            let title = session.hls.as_ref().map_or("", |(_, title)| title.as_str());
-            let params = json!({
-                "mode": "video",
-                "expanded": true,
-                "session": session.id,
-                "nonce": session.nonce,
-                "port": PORT,
-                "url": url,
-                "title": title,
-            });
-            if let Err(error) = self.tv.launch_overlay(&params) {
-                eprintln!("Luma Home Assistant video: {error}");
-            }
-        }
-    }
-
     /// Ends an overlay whose duration passed without the page reporting that it closed.
     pub fn tick(&mut self, now: Instant) {
-        self.play_resolved();
         if self
             .session
             .as_ref()
@@ -619,6 +547,22 @@ impl<T: Tv> Api<T> {
             ),
             ("POST", "/api/pair") => self.pair(&body, now),
             ("POST", "/api/pair/confirm") => self.confirm(&body, now),
+            // OK on a doorbell card: full screen, it stays until the owner closes it.
+            ("POST", "/api/overlay/expand") => {
+                if !request.peer.is_loopback() {
+                    return error(403, "Only the overlay app expands its card");
+                }
+                let session = self.session.as_mut().filter(|session| {
+                    !session.video
+                        && body["session"] == session.id.as_str()
+                        && body["nonce"] == session.nonce.as_str()
+                });
+                let expanded = session.is_some();
+                if let Some(session) = session {
+                    session.ends = now + VIDEO_TTL;
+                }
+                reply(200, json!({"expanded": expanded}))
+            }
             ("POST", "/api/overlay/closed") => {
                 if !request.peer.is_loopback() {
                     return error(403, "Only the overlay app reports closing");
@@ -631,12 +575,6 @@ impl<T: Tv> Api<T> {
                     self.finish_session(body["failed"] == true);
                 }
                 reply(200, json!({"ended": matches}))
-            }
-            ("POST", "/api/overlay/expand") => {
-                if !request.peer.is_loopback() {
-                    return error(403, "Only the overlay app expands its card");
-                }
-                reply(200, json!({"expanded": self.expand(&body, now)}))
             }
             (method, path) => {
                 let Some(client) = self.authorized(request) else {
@@ -664,7 +602,7 @@ impl<T: Tv> Api<T> {
                         }),
                     ),
                     ("POST", "/api/cameras") => self.set_cameras(client, &body),
-                    ("POST", "/api/overlay") => self.show(client, &body, now),
+                    ("POST", "/api/overlay") => self.show(&body, now),
                     ("DELETE", "/api/overlay") => {
                         // Dismissing closes a doorbell card, never a camera the owner is
                         // watching full screen in the Cameras app.
@@ -771,16 +709,19 @@ impl<T: Tv> Api<T> {
         reply(200, json!({"token": token, "id": self.store.device_id}))
     }
 
-    fn show(&mut self, client: usize, body: &Value, now: Instant) -> Reply {
+    fn show(&mut self, body: &Value, now: Instant) -> Reply {
         let parsed = (|| {
             let stream = camera_url(body, "stream_url")?;
             let snapshot = camera_url(body, "snapshot_url")?;
+            // Optional HLS playlist; the card shows the MJPEG or snapshots until it plays.
+            let hls = camera_url(body, "hls_url")?;
             if stream.is_none() && snapshot.is_none() {
                 return Err(error(400, "stream_url or snapshot_url is required"));
             }
             Ok((
                 stream,
                 snapshot,
+                hls,
                 text(body, "title", 80)?,
                 text(body, "message", 200)?,
                 number(body, "duration", 30., 5., 600.)?,
@@ -796,10 +737,9 @@ impl<T: Tv> Api<T> {
                     Some(Value::Bool(pause)) => *pause,
                     Some(_) => return Err(error(400, "pause must be true or false")),
                 },
-                text(body, "camera", 255)?,
             ))
         })();
-        let (stream, snapshot, title, message, duration, refresh, position, size, pause, camera) =
+        let (stream, snapshot, hls, title, message, duration, refresh, position, size, pause) =
             match parsed {
                 Ok(parsed) => parsed,
                 Err(reply) => return reply,
@@ -834,6 +774,7 @@ impl<T: Tv> Api<T> {
             "port": PORT,
             "stream": stream,
             "snapshot": snapshot,
+            "hls": hls,
             "refresh": refresh,
             "title": title,
             "message": message,
@@ -848,13 +789,6 @@ impl<T: Tv> Api<T> {
             media,
             ends: now + Duration::from_secs_f64(duration) + SESSION_GRACE,
             video: false,
-            hls: camera.and_then(|entity| {
-                let owner = &self.store.clients[client].token;
-                let (_, cameras) = self.cameras.iter().find(|(key, _)| key == owner)?;
-                let camera = cameras.iter().find(|camera| camera.id == entity)?;
-                let name = title.clone().unwrap_or_else(|| camera.name.clone());
-                Some((camera.hls.clone()?, name))
-            }),
         });
         if let Err(e) = self.tv.launch_overlay(&params) {
             self.end_session();
@@ -951,6 +885,32 @@ impl<T: Tv> Api<T> {
         };
         let order = merge(order, &self.store.gallery.order);
         let hidden = merge(hidden, &self.store.gallery.hidden);
+        let names = match body.get("names") {
+            None | Some(Value::Null) => None,
+            Some(Value::Object(given)) => {
+                let mut names = std::collections::BTreeMap::new();
+                for (id, name) in given {
+                    let Some(name) = name.as_str() else {
+                        return error(400, "names must map camera IDs to text");
+                    };
+                    let name = crate::model::clean_input_name(name);
+                    if id.len() <= 256 && !name.is_empty() {
+                        names.insert(id.clone(), name);
+                    }
+                }
+                // Names for cameras the gallery did not report are kept.
+                for (id, name) in &self.store.gallery.names {
+                    if !known.contains(id) && !names.contains_key(id) {
+                        names.insert(id.clone(), name.clone());
+                    }
+                }
+                if names.len() > MAX_ARRANGED {
+                    return error(400, "too many camera names");
+                }
+                Some(names)
+            }
+            Some(_) => return error(400, "names must be an object"),
+        };
         let snapshots = match body.get("live") {
             None | Some(Value::Null) => None,
             Some(Value::Bool(live)) => Some(!live),
@@ -966,6 +926,9 @@ impl<T: Tv> Api<T> {
         }
         if let Some(snapshots) = snapshots {
             gallery.snapshots = snapshots;
+        }
+        if let Some(names) = names {
+            gallery.names = names;
         }
         if *gallery != before {
             self.save();
@@ -1007,6 +970,7 @@ impl<T: Tv> Api<T> {
             .into_iter()
             .map(|(camera, id)| crate::cameras::Camera {
                 hidden: arranged.hidden.contains(&id),
+                label: arranged.names.get(&id).cloned(),
                 id,
                 name: camera.name.clone(),
                 stream: camera.stream.clone(),
@@ -1055,7 +1019,6 @@ impl<T: Tv> Api<T> {
             media,
             ends: now + VIDEO_TTL,
             video: true,
-            hls: None,
         });
         if let Err(error) = self.tv.launch_overlay(&params) {
             eprintln!("Luma Home Assistant video: {error}");

@@ -13,15 +13,16 @@ Assistant calls the TV; the TV never needs your Home Assistant password.
 ## What you get
 
 - **`luma.show_camera`**: a camera card in a corner of the screen with a title, an optional second
-  line and a countdown. **OK** on the remote shows the camera full screen, as live video when
-  Home Assistant can stream it; **Back** closes it; otherwise it closes after its duration.
+  line and a countdown. **OK** on the remote shows the camera full screen; **Back** closes it;
+  otherwise it closes after its duration.
   Choose whether the show keeps playing underneath or pauses until the card closes.
 - **`luma.dismiss`** and a **Dismiss overlay** button: close the card from Home Assistant, for
   example when the door opens.
 - **`luma.notify`** and a **Toast** notify entity: a standard webOS toast over any app.
 - **A Cameras app** in Luma: every Home Assistant camera in a full-screen grid. Arrows choose a
   camera, **OK** shows it full screen, **Back** returns to the grid and then closes it. Hold
-  **OK** on a camera to move or hide it; the settings button shows hidden cameras again.
+  **OK** on a camera to move, rename or hide it; the settings button shows hidden cameras again.
+  Five or more cameras show three across and two rows at a time; scroll down for the rest.
 - **Show example camera card** and **Show example toast** buttons: press them on the TV's device
   page to see what each popup looks like, before writing any automation. The example card shows a
   picture of a front door that comes with the integration, so it works without a camera.
@@ -78,8 +79,11 @@ The TV loads camera images itself, so the address must be reachable from the TV.
   snapshot_url: http://192.168.1.10:1984/api/frame.jpeg?src=front_door
   ```
 
-The TV shows motion-JPEG and JPEG only. It does not decode RTSP/H.264, so the TV's video decoder
-stays with the show you are watching.
+For a camera entity, the card plays Home Assistant's HLS stream: the camera's own video at its
+full frame rate, muted, decoded by the TV, a second or two behind real time (see
+[Live video in the card](#live-video-in-the-card)). Otherwise it shows motion-JPEG or JPEG;
+`mode: stream` keeps a camera entity on motion-JPEG, so the TV's video decoder stays with the show
+you are watching.
 
 ## Cameras app
 
@@ -144,17 +148,45 @@ automation:
 Leave out `config_entry_id` to show the camera on every paired TV, or pick one TV in the action
 editor.
 
-| Field                        | Default     | Notes                                                          |
-| ---------------------------- | ----------- | -------------------------------------------------------------- |
-| `camera`                     |             | A camera entity; or give `stream_url` / `snapshot_url`.        |
-| `stream_url`, `snapshot_url` |             | Absolute `http(s)` URLs the TV can load.                       |
-| `mode`                       | `stream`    | `stream` (motion-JPEG, falls back to snapshots) or `snapshot`. |
-| `refresh`                    | `1`         | Seconds between snapshots, 0.25–30.                            |
-| `title`, `message`           | camera name | Up to 80 and 200 characters.                                   |
-| `duration`                   | `30`        | Seconds, 5–600.                                                |
-| `position`                   | `top-right` | Any corner.                                                    |
-| `size`                       | `medium`    | `small` (480 px), `medium` (640 px) or `large` (800 px).       |
-| `pause`                      | `false`     | Pause playback until the card closes.                          |
+| Field                        | Default     | Notes                                                    |
+| ---------------------------- | ----------- | -------------------------------------------------------- |
+| `camera`                     |             | A camera entity; or give `stream_url` / `snapshot_url`.  |
+| `stream_url`, `snapshot_url` |             | Absolute `http(s)` URLs the TV can load.                 |
+| `mode`                       | `video`     | `video` (HLS), `stream` (motion-JPEG) or `snapshot`.     |
+| `refresh`                    | `1`         | Seconds between snapshots, 0.25–30.                      |
+| `title`, `message`           | camera name | Up to 80 and 200 characters.                             |
+| `duration`                   | `30`        | Seconds, 5–600.                                          |
+| `position`                   | `top-right` | Any corner.                                              |
+| `size`                       | `medium`    | `small` (480 px), `medium` (640 px) or `large` (800 px). |
+| `pause`                      | `false`     | Pause playback until the card closes.                    |
+
+### Live video in the card
+
+With a camera entity that can stream (most RTSP cameras, including UniFi
+Protect), Home Assistant starts the camera's HLS stream when the card is requested. The card shows
+the motion-JPEG while the video starts, which usually takes a few seconds, then switches to the
+video. A camera that cannot stream, a video that does not play within 15 seconds, or one that
+stops, keeps or goes back to the motion-JPEG. Like the Cameras app, this needs Home Assistant's
+**Stream** integration. The video is muted.
+
+The card's video uses the TV's video decoder while something else is playing. Whether the show
+underneath keeps playing smoothly depends on the TV model and firmware. If it does not, use
+`mode: stream`, or `pause: true`. Please report what works on yours.
+
+To peek at a camera any time, as if the doorbell rang, call the same action from a script and put
+it on a dashboard:
+
+```yaml
+script:
+  peek_front_door:
+    alias: Peek at front door
+    icon: mdi:doorbell-video
+    sequence:
+      - action: luma.show_camera
+        data:
+          camera: camera.front_door_medium_resolution_channel
+          message: Live view
+```
 
 A second ring while the card is showing replaces it. When the first ring paused the show, it stays
 paused until the replacement closes.
@@ -166,11 +198,9 @@ entity before `luma.show_camera`.
 
 ## While the card is showing
 
-The card has key focus, so **Back** closes it and **OK** shows the camera full screen. Full screen,
-the camera stays until **Back** or **OK** closes it, with the camera's own feed at first. For a
-`camera` entity whose stream Home Assistant can play (the Cameras app's **Live video**), Luma then
-starts that HLS stream and the full-frame-rate video replaces the feed once it plays. A paused show
-resumes when the camera closes. Other remote keys, such as play/pause, may not reach
+The card has key focus, so **Back** closes it and **OK** shows the camera full screen: its live
+video, or its motion-JPEG feed when it has none, with no countdown. Full screen, **Back** or **OK**
+closes it, and a paused show resumes. Other remote keys, such as play/pause, may not reach
 the app underneath until it closes. How webOS routes keys to overlay windows depends on firmware.
 
 ## Security
