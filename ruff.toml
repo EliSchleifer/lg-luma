@@ -1,7 +1,8 @@
-# Python in this repository is the Home Assistant integration (custom_components/luma).
+# Python in this repository is the Home Assistant integration (custom_components/luma) and the
+# maintainer-only dev access broker (ha-dev/custom_components/luma_dev_access).
 line-length = 100
 target-version = "py313"
-include = ["custom_components/**/*.py", "tests/home-assistant/**/*.py"]
+include = ["custom_components/**/*.py", "ha-dev/**/*.py", "tests/home-assistant/**/*.py"]
 
 [lint]
 select = ["E", "F", "W", "B", "UP", "I", "SIM", "RUF"]

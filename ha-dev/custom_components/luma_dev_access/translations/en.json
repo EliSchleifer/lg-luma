@@ -1,0 +1,63 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Luma dev access",
+        "description": "Lets cloud development sessions SSH to the TV for a few hours at a time. Each request waits for your tap on your phone; Home Assistant then adds a new key to the TV and removes it when it expires (at most 8 hours).",
+        "data": {
+          "tv_host": "TV address on your home network",
+          "tv_port": "TV SSH port",
+          "tunnel_hostname": "Tunnel hostname cloud sessions use for SSH",
+          "notify_service": "Phone that approves requests",
+          "cloudflare_client_id": "Cloudflare Access service token Client ID (optional)",
+          "cloudflare_client_secret": "Cloudflare Access service token Client Secret (optional)"
+        },
+        "data_description": {
+          "notify_service": "Only this phone's Companion app can approve. Requests show an Approve and a Deny button.",
+          "cloudflare_client_id": "Handed to approved sessions so cloudflared can reach the TV's tunnel without a login."
+        }
+      },
+      "finish": {
+        "title": "Two things to copy now",
+        "description": "**1. Dev token** (shown only now). Add it to the cloud environment as `LUMA_DEV_TOKEN`:\n\n`{token}`\n\n**2. Home Assistant's key for the TV.** On the TV, append this line to `/home/root/.ssh/authorized_keys`:\n\n`{authorized_keys_line}`\n\nSubmit when both are done."
+      }
+    },
+    "error": {
+      "not_a_phone": "Choose a phone's Companion app notify service (notify.mobile_app_…).",
+      "cloudflare_pair": "Enter both the Client ID and the Client Secret, or neither."
+    },
+    "abort": {
+      "single_instance_allowed": "Luma dev access is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Luma dev access",
+        "description": "Home Assistant's key for the TV (append to `/home/root/.ssh/authorized_keys` if it is missing):\n\n`{authorized_keys_line}`",
+        "data": {
+          "tv_host": "TV address on your home network",
+          "tv_port": "TV SSH port",
+          "tunnel_hostname": "Tunnel hostname cloud sessions use for SSH",
+          "notify_service": "Phone that approves requests",
+          "cloudflare_client_id": "Cloudflare Access service token Client ID (optional)",
+          "cloudflare_client_secret": "Cloudflare Access service token Client Secret (optional)",
+          "rotate_token": "Make a new dev token (the old one stops working)",
+          "forget_host_key": "Forget TV host key (after a TV reset)"
+        },
+        "data_description": {
+          "notify_service": "Only this phone's Companion app can approve. Requests show an Approve and a Deny button.",
+          "cloudflare_client_id": "Handed to approved sessions so cloudflared can reach the TV's tunnel without a login."
+        }
+      },
+      "new_token": {
+        "title": "New dev token",
+        "description": "Replace `LUMA_DEV_TOKEN` in the cloud environment with this token (shown only now):\n\n`{token}`"
+      }
+    },
+    "error": {
+      "not_a_phone": "Choose a phone's Companion app notify service (notify.mobile_app_…).",
+      "cloudflare_pair": "Enter both the Client ID and the Client Secret, or neither."
+    }
+  }
+}

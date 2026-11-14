@@ -1,0 +1,14 @@
+{
+  "domain": "luma_dev_access",
+  "name": "Luma dev access",
+  "after_dependencies": ["luma", "mobile_app", "notify"],
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": ["http"],
+  "documentation": "https://github.com/elischleifer-trunk/lg-luma/blob/main/ha-dev/readme.md",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "requirements": ["asyncssh==2.23.1"],
+  "single_config_entry": true,
+  "version": "1.0.0"
+}
