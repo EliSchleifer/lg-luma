@@ -1,8 +1,9 @@
-"""SSH from Home Assistant to the TV over the home network: add, check and remove session keys.
+"""Developer access: SSH from Home Assistant to the TV over the home network, to add, check and
+remove session keys. Imported only once developer access is on and asyncssh is installed.
 
-Home Assistant logs in with its own management key, kept only in this integration's entry. The
-TV's host key is pinned the first time it answers; a changed host key stops every operation
-until the owner chooses Forget TV host key in the options.
+Home Assistant logs in with its own management key, kept only in the config entry. The TV's host
+key is pinned the first time it answers; a changed host key stops every operation until the owner
+chooses Forget TV host key in the options.
 """
 
 from __future__ import annotations
@@ -10,11 +11,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
 
 import asyncssh
 
-from . import keys
+from . import dev_keys as keys
 
 _LOGGER = logging.getLogger(__name__)
 AUTHORIZED_KEYS = "/home/root/.ssh/authorized_keys"
@@ -27,24 +27,6 @@ class TvError(Exception):
 
 class HostKeyChanged(TvError):
     """The TV answered with a different host key than the pinned one."""
-
-
-@dataclass
-class Generated:
-    private_key: str  # OpenSSH format
-    public_key: str  # "ssh-ed25519 AAAA…"
-
-
-def generate_key(comment: str) -> Generated:
-    key = asyncssh.generate_private_key("ssh-ed25519", comment=comment)
-    return Generated(
-        key.export_private_key().decode(),
-        key.export_public_key().decode().strip(),
-    )
-
-
-def public_key_of(private_key: str) -> str:
-    return asyncssh.import_private_key(private_key).export_public_key().decode().strip()
 
 
 class Tv:
@@ -117,7 +99,7 @@ class Tv:
             await self._run(conn, "true")
         return True
 
-    async def install(self, generated: Generated, request_id: str, expires_at: int) -> None:
+    async def install(self, generated: keys.KeyPair, request_id: str, expires_at: int) -> None:
         """Add a session key and check that the TV accepts it. Some Dropbear builds reject
         option-prefixed lines; then the key is added without options."""
         async with self._lock:

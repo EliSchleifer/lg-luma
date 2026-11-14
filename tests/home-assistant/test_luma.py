@@ -759,7 +759,7 @@ async def keys_form(hass: HomeAssistant, config: MockConfigEntry):
     """Configure opens a menu; streaming search keys are one of its pages."""
     result = await hass.config_entries.options.async_init(config.entry_id)
     assert result["type"] is FlowResultType.MENU
-    assert result["menu_options"] == ["phone_keyboard", "streaming_keys"]
+    assert result["menu_options"] == ["phone_keyboard", "streaming_keys", "developer_access"]
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], {"next_step_id": "streaming_keys"}
     )

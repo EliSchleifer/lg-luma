@@ -32,11 +32,18 @@ test('upsertBlock puts the managed block first, replaces it and removes it', () 
   assert.equal(upsertBlock(twice, null), user);
 });
 
-test('sshConfigBlock routes through the proxy script', () => {
-  const block = sshConfigBlock('tv.example.com', '/k', '/p');
-  assert.match(block, /HostName tv\.example\.com/);
-  assert.match(block, /ProxyCommand \/p %h/);
-  assert.match(block, /IdentitiesOnly yes/);
+test('sshConfigBlock goes through the proxy script only for a tunnel', () => {
+  const tunnel = sshConfigBlock({ hostname: 'tv.example.com', tunnel: true }, '/k', '/p');
+  assert.match(tunnel, /HostName tv\.example\.com/);
+  assert.match(tunnel, /ProxyCommand \/p %h/);
+  assert.match(tunnel, /IdentitiesOnly yes/);
+  const direct = sshConfigBlock(
+    { hostname: '192.168.1.50', port: 2222, tunnel: false },
+    '/k',
+    '/p',
+  );
+  assert.match(direct, /Port 2222/);
+  assert.doesNotMatch(direct, /ProxyCommand/);
 });
 
 test('proxyScript exports the service token only when given', () => {

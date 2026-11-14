@@ -5,11 +5,8 @@ import sys
 
 import pytest
 
-# custom_components/ lives at the repository root; ha-dev/custom_components/ holds the
-# maintainer-only luma_dev_access. Both are parts of one `custom_components` namespace package.
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "ha-dev"))
-sys.path.insert(0, str(ROOT))
+# custom_components/ lives at the repository root.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 
 @pytest.fixture(autouse=True)

@@ -1,4 +1,4 @@
-"""authorized_keys lines and dev tokens. Pure functions, no Home Assistant or network.
+"""Developer access: authorized_keys lines, key pairs and dev tokens. No Home Assistant or network.
 
 Session keys carry a comment `luma-dev:<request id>:<expiry, Unix seconds>`. Only lines with
 that tag are ever removed; every other line of the TV's authorized_keys is kept byte for byte.
@@ -11,11 +11,51 @@ import hashlib
 import hmac
 import re
 import secrets
+from dataclasses import dataclass
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 TAG = "luma-dev"
 # Keys may run commands but not turn the TV into a gateway: Dropbear supports these options.
 OPTIONS = "no-port-forwarding,no-agent-forwarding,no-X11-forwarding"
 _TAG_RE = re.compile(rf"\s{TAG}:([A-Za-z0-9_-]+):(\d+)\s*$")
+
+
+@dataclass
+class KeyPair:
+    private_key: str  # OpenSSH format
+    public_key: str  # "ssh-ed25519 AAAA…"
+
+
+def generate_key() -> KeyPair:
+    """A new ed25519 key pair (cryptography ships with Home Assistant; no asyncssh needed)."""
+    key = Ed25519PrivateKey.generate()
+    private = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.OpenSSH,
+        serialization.NoEncryption(),
+    ).decode()
+    return KeyPair(private, _public(key))
+
+
+def public_key_of(private_key: str) -> str:
+    key = serialization.load_ssh_private_key(private_key.encode(), password=None)
+    return _public(key)
+
+
+def _public(key) -> str:
+    return (
+        key.public_key()
+        .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
+        .decode()
+    )
+
+
+def manager_line(private_key: str) -> str:
+    """The authorized_keys line for Home Assistant's own management key."""
+    algorithm, blob = public_key_of(private_key).split()[:2]
+    return f"{OPTIONS} {algorithm} {blob} luma-dev-manager"
 
 
 def new_token() -> str:

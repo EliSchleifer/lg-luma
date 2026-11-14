@@ -89,8 +89,9 @@ to use it for testing on the TV. From a cloud session:
 
 1. **Preferred, when `LUMA_DEV_TOKEN` is set:** install `openssh-client`, then run
    `node tools/tv-access.mjs request --reason "<what you will test>"`. It asks Home Assistant
-   (`ha.elischleifer.com`, see `ha-dev/readme.md`), which asks the maintainer to approve on their
-   phone; tell the maintainer you are waiting. On approval it sets up `ssh tv` with a key valid for
+   (`ha.elischleifer.com`; Luma's developer access, see `home-assistant.md#developer-access`),
+   which asks the maintainer to approve on their phone; tell the maintainer you are waiting. On
+   approval it sets up `ssh tv` with a key valid for
    up to 8 hours, the Cloudflare service token, and streaming search keys in `.env`. Run
    `node tools/tv-access.mjs check` to confirm, and `node tools/tv-access.mjs release` when done
    with the TV. Never print the key or tokens, and never copy them anywhere else.

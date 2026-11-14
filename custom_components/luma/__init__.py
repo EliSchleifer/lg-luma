@@ -52,7 +52,7 @@ from homeassistant.helpers.network import NoURLAvailableError, get_url
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
 
-from . import keyboard, streaming_keys, versions
+from . import dev_access, keyboard, streaming_keys, versions
 from .api import LumaAuthError, LumaClient, LumaError
 from .const import (
     CONF_TOKEN,
@@ -153,6 +153,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: LumaConfigEntry) -> bool
     # Home Assistant holds the streaming search keys: send them now and whenever they change.
     entry.async_create_background_task(hass, _push_keys(entry), f"{DOMAIN} keys {entry.entry_id}")
     entry.async_on_unload(entry.add_update_listener(_options_updated))
+    # Developer access is off unless turned on in the options (see dev_access.py).
+    if dev_access.enabled(entry):
+        entry.async_create_background_task(
+            hass, dev_access.async_update(hass, entry), f"{DOMAIN} dev access {entry.entry_id}"
+        )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     # After the platforms, so the TV's device exists for the first events' device_id.
     await events.async_start()
@@ -160,6 +165,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: LumaConfigEntry) -> bool
 
 
 async def _options_updated(hass: HomeAssistant, entry: LumaConfigEntry) -> None:
+    await dev_access.async_update(hass, entry)
     await _push_keys(entry)
     # Only when phone typing is on, or was: turning it off tells the TV to stop calling.
     if keyboard.phones(entry) or entry.runtime_data.keyboard:
@@ -257,6 +263,7 @@ def _track_cameras(hass: HomeAssistant, entry: LumaConfigEntry, client: LumaClie
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: LumaConfigEntry) -> bool:
+    await dev_access.async_stop(hass, entry)
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 

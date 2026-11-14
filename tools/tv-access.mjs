@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Short-lived SSH access to the development TV for cloud sessions, approved on the maintainer's
-// phone through Home Assistant (ha-dev/custom_components/luma_dev_access, see ha-dev/readme.md).
+// phone through the Luma Home Assistant integration's developer access (off by default; see
+// custom_components/luma/dev_access.py and home-assistant.md#developer-access).
 //
 //   node tools/tv-access.mjs request [--reason "why"] [--ttl 8h]   ask, wait for the tap, set up `ssh tv`
 //   node tools/tv-access.mjs check                                  run a harmless luna-send on the TV
@@ -63,14 +64,17 @@ function escape(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-export function sshConfigBlock(hostname, keyPath = FILES.key, proxyPath = FILES.proxy) {
+/** `Host tv` for the payload's ssh block: through cloudflared when it names a tunnel, otherwise
+ * straight to the TV's address and port. */
+export function sshConfigBlock(ssh, keyPath = FILES.key, proxyPath = FILES.proxy) {
+  const route = ssh.tunnel ? `  ProxyCommand ${proxyPath} %h` : `  Port ${ssh.port ?? 22}`;
   return [
     'Host tv',
-    `  HostName ${hostname}`,
-    '  User root',
+    `  HostName ${ssh.hostname}`,
+    `  User ${ssh.user ?? 'root'}`,
     `  IdentityFile ${keyPath}`,
     '  IdentitiesOnly yes',
-    `  ProxyCommand ${proxyPath} %h`,
+    route,
     '  StrictHostKeyChecking accept-new',
     '  ServerAliveInterval 30',
   ].join('\n');
@@ -165,7 +169,7 @@ class Broker {
     this.token = env.LUMA_DEV_TOKEN;
     if (!this.token) {
       throw new Error(
-        'Set LUMA_DEV_TOKEN (the dev token from the Luma dev access integration in Home Assistant).',
+        'Set LUMA_DEV_TOKEN (the dev token from Luma → Configure → Developer access in Home Assistant).',
       );
     }
     this.headers = { 'X-Luma-Dev-Token': this.token, 'Content-Type': 'application/json' };
@@ -176,7 +180,7 @@ class Broker {
   }
 
   async call(method, endpoint, body) {
-    const response = await fetch(`${this.base}/api/luma_dev/${endpoint}`, {
+    const response = await fetch(`${this.base}/api/luma/dev/${endpoint}`, {
       method,
       headers: this.headers,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -201,9 +205,8 @@ class Broker {
 const FAILURES = {
   401: 'Home Assistant refused LUMA_DEV_TOKEN.',
   403: 'The request was denied on the phone.',
-  404: 'Home Assistant does not know this request (it may have restarted).',
+  404: 'Developer access is off in Home Assistant (Luma → Configure → Developer access), or it restarted and forgot this request.',
   429: 'Too many requests, or locked after wrong tokens. Try again later.',
-  503: 'Luma dev access is not running in Home Assistant.',
 };
 
 function failure(status, json) {
@@ -218,7 +221,6 @@ async function request({ reason, ttl, force }) {
     return;
   }
   const broker = new Broker();
-  const cloudflared = await ensureCloudflared();
   if (!which('ssh')) {
     throw new Error('Install the OpenSSH client first: apt-get install -y openssh-client');
   }
@@ -238,18 +240,20 @@ async function request({ reason, ttl, force }) {
     }
     throw failure(result?.status, result?.json);
   }
-  install(result.json, cloudflared, id);
+  await install(result.json, id);
 }
 
-function install(payload, cloudflared, id) {
+async function install(payload, id) {
   const { ssh, cloudflare, streaming, expires_at: expiresAt } = payload;
   fs.mkdirSync(SSH_DIR, { recursive: true, mode: 0o700 });
   writePrivate(
     FILES.key,
     ssh.private_key.endsWith('\n') ? ssh.private_key : `${ssh.private_key}\n`,
   );
-  writePrivate(FILES.proxy, proxyScript(cloudflared, cloudflare), 0o700);
-  editBlock(FILES.sshConfig, sshConfigBlock(ssh.hostname));
+  if (ssh.tunnel)
+    writePrivate(FILES.proxy, proxyScript(await ensureCloudflared(), cloudflare), 0o700);
+  else remove(FILES.proxy);
+  editBlock(FILES.sshConfig, sshConfigBlock(ssh));
   const lines = dotenvBlock(streaming, read(FILES.dotenv));
   editBlock(FILES.dotenv, lines.length ? lines.join('\n') : null);
   writePrivate(
@@ -257,10 +261,11 @@ function install(payload, cloudflared, id) {
     `${JSON.stringify({ request_id: id, expires_at: expiresAt, hostname: ssh.hostname }, null, 2)}\n`,
   );
   const keysWritten = lines.map((line) => line.split('=')[0]);
-  console.log(`TV access approved until ${expiresAt}.`);
-  console.log(
-    `  ssh tv  → root@${ssh.hostname} via cloudflared${cloudflare ? ' (service token)' : ''}`,
-  );
+  console.log(`Access to ${payload.tv ?? 'the TV'} approved until ${expiresAt}.`);
+  const route = ssh.tunnel
+    ? `via cloudflared${cloudflare ? ' (service token)' : ''}`
+    : `port ${ssh.port ?? 22}`;
+  console.log(`  ssh tv  → root@${ssh.hostname} ${route}`);
   if (keysWritten.length) console.log(`  .env: ${keysWritten.join(', ')}`);
   console.log('Check it with: node tools/tv-access.mjs check');
 }

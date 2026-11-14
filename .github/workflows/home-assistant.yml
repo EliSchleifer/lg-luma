@@ -6,7 +6,6 @@ on:
     paths:
       [
         'custom_components/**',
-        'ha-dev/**',
         'tests/home-assistant/**',
         'ruff.toml',
         'hacs.json',
@@ -16,7 +15,6 @@ on:
     paths:
       [
         'custom_components/**',
-        'ha-dev/**',
         'tests/home-assistant/**',
         'ruff.toml',
         'hacs.json',
