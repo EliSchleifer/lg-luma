@@ -636,8 +636,10 @@ class Broker:
     async def _sweep(self) -> None:
         assert self.tv
         try:
-            remaining = await self.tv.sweep(remove=frozenset(self._pending_removal))
-            self._pending_removal.clear()
+            retried = frozenset(self._pending_removal)
+            remaining = await self.tv.sweep(remove=retried)
+            # Only what this sweep removed: a release that failed meanwhile stays queued.
+            self._pending_removal -= retried
         except self._dev_tv.TvError as err:
             _LOGGER.debug("Developer access sweep skipped: %s", err)
             return
