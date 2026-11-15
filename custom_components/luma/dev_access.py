@@ -132,7 +132,8 @@ async def async_update(hass: HomeAssistant, entry: ConfigEntry) -> None:
     running = registry.brokers.get(entry.entry_id)
     if not enabled(entry):
         if running:
-            await async_stop(hass, entry)
+            # Turned off: take every session key off the TV, since nothing will expire them.
+            await async_stop(hass, entry, revoke=True)
         return
     if running and running.fingerprint == _fingerprint(entry):
         return
@@ -141,7 +142,12 @@ async def async_update(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if not await _requirements(hass):
         return
     broker = Broker(hass, entry)
-    await broker.async_start()
+    try:
+        await broker.async_start()
+    except Exception:
+        # Developer access must never break the rest of the integration.
+        _LOGGER.exception("Developer access could not start; it stays off")
+        return
     registry.brokers[entry.entry_id] = broker
     if not registry.views and hass.http is not None:
         for view in (RequestView, ResultView, ReleaseView):
@@ -150,10 +156,32 @@ async def async_update(hass: HomeAssistant, entry: ConfigEntry) -> None:
     _LOGGER.info("Developer access is on for %s", entry.title)
 
 
-async def async_stop(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def async_stop(hass: HomeAssistant, entry: ConfigEntry, *, revoke: bool = False) -> None:
+    """Stop this entry's broker. A plain stop (unload, restart) leaves session keys on the TV:
+    the next start's sweep finds them and expires them on time. `revoke` removes them all."""
     broker = _registry(hass).brokers.pop(entry.entry_id, None)
     if broker is not None:
-        await broker.async_stop()
+        await broker.async_stop(revoke=revoke)
+
+
+async def async_revoke_removed(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """The entry is being deleted: take its session keys off the TV, best effort."""
+    if not entry.data.get(CONF_DEV_KEY) or not await _requirements(hass):
+        return
+    try:
+        from . import dev_tv
+
+        stored = await _store(hass, entry).async_load() or {}
+        tv = dev_tv.Tv(
+            entry.data[CONF_HOST],
+            int(entry.options.get(CONF_DEV_SSH_PORT) or DEFAULT_SSH_PORT),
+            entry.data[CONF_DEV_KEY],
+            stored.get("tv_host_key"),
+        )
+        await tv.remove_all()
+    except Exception as err:
+        _LOGGER.warning("Could not remove developer access keys from the TV: %s", err)
+    await _store(hass, entry).async_remove()
 
 
 async def _requirements(hass: HomeAssistant) -> bool:
@@ -161,6 +189,11 @@ async def _requirements(hass: HomeAssistant) -> bool:
         await async_process_requirements(hass, DOMAIN, DEV_REQUIREMENTS)
     except Exception as err:
         _LOGGER.error("Developer access needs asyncssh, which could not be installed: %s", err)
+        return False
+    try:
+        import asyncssh  # noqa: F401
+    except ImportError:
+        _LOGGER.error("Developer access needs asyncssh, which is not installed (skip_pip?)")
         return False
     return True
 
@@ -179,8 +212,10 @@ def _store(hass: HomeAssistant, entry: ConfigEntry) -> Store[dict[str, Any]]:
 @dataclass
 class _Registry:
     brokers: dict[str, Broker] = field(default_factory=dict)
-    bad_tokens: deque[float] = field(default_factory=deque)
-    locked_until: float = 0.0
+    # Wrong tokens and lockouts per client address, so no one can lock out anyone else.
+    bad_tokens: dict[str, deque[float]] = field(default_factory=dict)
+    locked_until: dict[str, float] = field(default_factory=dict)
+    last_lock_notice: float = 0.0
     views: bool = False
 
 
@@ -190,34 +225,42 @@ def _registry(hass: HomeAssistant) -> _Registry:
     return hass.data[DATA]
 
 
-def _authorize(hass: HomeAssistant, token: str | None) -> Broker:
-    """The broker whose TV this token belongs to."""
+def _authorize(hass: HomeAssistant, token: str | None, client: str) -> Broker:
+    """The broker whose TV this token belongs to. Calls without a token are refused without
+    counting; ten wrong tokens in an hour lock out that client address only, and the phone
+    hears about lockouts at most once a day."""
     registry = _registry(hass)
     if not registry.brokers:
         raise DevAccessError(404, "not_found")
     now = time.time()
-    if now < registry.locked_until:
+    if now < registry.locked_until.get(client, 0.0):
         raise DevAccessError(429, "locked")
-    if token:
-        digest = hashlib.sha256(token.encode()).hexdigest()
-        for broker in registry.brokers.values():
-            if secrets.compare_digest(digest, broker.entry.data[CONF_DEV_TOKEN_HASH]):
-                return broker
-    registry.bad_tokens.append(now)
-    while registry.bad_tokens and registry.bad_tokens[0] < now - 3600:
-        registry.bad_tokens.popleft()
-    if len(registry.bad_tokens) >= BAD_TOKENS_PER_HOUR:
-        registry.locked_until = now + LOCKOUT
-        registry.bad_tokens.clear()
-        _LOGGER.warning("Too many wrong developer access tokens: locked for an hour")
-        for broker in registry.brokers.values():
-            hass.async_create_task(
-                broker.notify(
-                    "Luma developer access locked",
-                    "Too many requests with a wrong token. Requests are refused for an hour. "
-                    "Make a new dev token in Luma's options if it leaked.",
+    if not token:
+        raise DevAccessError(401, "bad_token")
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    for broker in registry.brokers.values():
+        if secrets.compare_digest(digest, broker.entry.data[CONF_DEV_TOKEN_HASH]):
+            return broker
+    failures = registry.bad_tokens.setdefault(client, deque())
+    failures.append(now)
+    while failures and failures[0] < now - 3600:
+        failures.popleft()
+    if len(failures) >= BAD_TOKENS_PER_HOUR:
+        registry.locked_until[client] = now + LOCKOUT
+        del registry.bad_tokens[client]
+        _LOGGER.warning(
+            "Too many wrong developer access tokens from %s: locked for an hour", client
+        )
+        if now - registry.last_lock_notice > 86400:
+            registry.last_lock_notice = now
+            for broker in registry.brokers.values():
+                hass.async_create_task(
+                    broker.notify(
+                        "Luma developer access",
+                        f"Repeated wrong dev tokens from {client}; that address is refused for "
+                        "an hour. Make a new dev token in Luma's options if yours leaked.",
+                    )
                 )
-            )
     raise DevAccessError(401, "bad_token")
 
 
@@ -263,6 +306,8 @@ class Broker:
         self._key_timers: dict[str, CALLBACK_TYPE] = {}
         self._unsubs: list[CALLBACK_TYPE] = []
         self._tasks: set[asyncio.Task] = set()
+        # Released keys the TV was not reachable to remove; each sweep retries them.
+        self._pending_removal: set[str] = set()
         self.tv: dev_tv.Tv | None = None
 
     async def async_start(self) -> None:
@@ -276,14 +321,27 @@ class Broker:
             self.entry.data[CONF_DEV_KEY],
             stored.get("tv_host_key"),
         )
-        self.tv.options_supported = stored.get("options_supported")
+        self._pending_removal = set(stored.get("pending_removal") or [])
         self._unsubs.append(self.hass.bus.async_listen(NOTIFICATION_EVENT, self._on_action))
         self._unsubs.append(
             async_track_time_interval(self.hass, self._interval_sweep, SWEEP_INTERVAL)
         )
         self._background(self._sweep())
 
-    async def async_stop(self) -> None:
+    async def async_stop(self, *, revoke: bool = False) -> None:
+        if revoke and self.tv is not None:
+            try:
+                await self.tv.remove_all()
+                self._pending_removal.clear()
+                await self._save()
+            except self._dev_tv.TvError as err:
+                _LOGGER.warning("Could not remove developer access keys from the TV: %s", err)
+                await self.notify(
+                    "Luma developer access",
+                    f"Developer access is off, but {self.entry.title} did not answer, so session "
+                    "keys may still be in /home/root/.ssh/authorized_keys (lines tagged "
+                    "luma-dev:). Remove them, or turn developer access on and off again.",
+                )
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -305,7 +363,7 @@ class Broker:
     async def _save(self) -> None:
         assert self.tv
         await self._store.async_save(
-            {"tv_host_key": self.tv.host_key, "options_supported": self.tv.options_supported}
+            {"tv_host_key": self.tv.host_key, "pending_removal": sorted(self._pending_removal)}
         )
 
     async def create(self, reason: Any, ttl: Any) -> Request:
@@ -331,9 +389,13 @@ class Broker:
         )
         self._requests[request.id] = request
         self._forget_old(now)
-        request.timer = async_call_later(
-            self.hass, PENDING_TIMEOUT, lambda _now: self._expire_pending(request)
-        )
+
+        # A @callback runs on the event loop; a plain lambda would run in a worker thread.
+        @callback
+        def _expire(_now: datetime) -> None:
+            self._expire_pending(request)
+
+        request.timer = async_call_later(self.hass, PENDING_TIMEOUT, _expire)
         hours = f"{seconds / 3600:g} h" if seconds >= 3600 else f"{seconds // 60} min"
         await self.notify(
             f"Cloud session wants SSH access to {self.entry.title}",
@@ -393,14 +455,24 @@ class Broker:
         generated = await self.hass.async_add_executor_job(keys.generate_key)
         try:
             await self.tv.install(generated, request.id, expires_at)
-        except self._dev_tv.TvError as err:
+        except Exception as err:
             _LOGGER.error("Could not add the session key to the TV: %s", err)
-            changed = isinstance(err, self._dev_tv.HostKeyChanged)
-            request.error = "tv_host_key_changed" if changed else "tv_unreachable"
+            if isinstance(err, self._dev_tv.HostKeyChanged):
+                request.error = "tv_host_key_changed"
+                hint = "Its SSH host key changed: choose Forget TV host key in Luma's options."
+            elif isinstance(err, self._dev_tv.KeyRefused):
+                request.error = "tv_refused_key"
+                hint = (
+                    "It refused Home Assistant's key: add the line from Luma → Configure → "
+                    "Developer access to /home/root/.ssh/authorized_keys on the TV."
+                )
+            else:
+                request.error = "tv_unreachable"
+                hint = str(err)
             request.set_state(FAILED)
             await self.notify(
                 "Luma developer access failed",
-                f"Could not add the key to {self.entry.title}: {err}",
+                f"Could not add the key to {self.entry.title}. {hint}",
                 tag=self._tag(request),
             )
             return
@@ -519,6 +591,8 @@ class Broker:
         except self._dev_tv.TvError as err:
             # The periodic sweep removes it once the TV answers again.
             _LOGGER.warning("Could not remove session key %s yet: %s", request_id[:6], err)
+            self._pending_removal.add(request_id)
+            await self._save()
 
     async def _interval_sweep(self, _now: datetime) -> None:
         await self._sweep()
@@ -526,7 +600,8 @@ class Broker:
     async def _sweep(self) -> None:
         assert self.tv
         try:
-            remaining = await self.tv.sweep()
+            remaining = await self.tv.sweep(remove=frozenset(self._pending_removal))
+            self._pending_removal.clear()
         except self._dev_tv.TvError as err:
             _LOGGER.debug("Developer access sweep skipped: %s", err)
             return
@@ -576,7 +651,10 @@ class _View(HomeAssistantView):
     cors_allowed = False
 
     def _broker(self, request: web.Request) -> Broker:
-        return _authorize(request.app["hass"], request.headers.get(DEV_TOKEN_HEADER))
+        # Home Assistant's own client address (behind trusted proxies, the forwarded one).
+        return _authorize(
+            request.app["hass"], request.headers.get(DEV_TOKEN_HEADER), request.remote or ""
+        )
 
 
 class RequestView(_View):

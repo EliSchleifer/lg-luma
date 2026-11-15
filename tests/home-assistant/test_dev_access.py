@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
-from pytest_homeassistant_custom_component.common import MockConfigEntry, async_mock_service
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+    async_mock_service,
+)
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker
 
 from custom_components.luma import dev_keys as keys
@@ -23,6 +29,7 @@ from custom_components.luma.dev_access import (
     DATA,
     MAX_TTL,
     NOTIFICATION_EVENT,
+    _authorize,
 )
 
 HOST = "192.168.1.50"
@@ -87,8 +94,9 @@ def fake_tv():
         patch.object(tv.Tv, "install", AsyncMock()) as install,
         patch.object(tv.Tv, "remove", AsyncMock(return_value={})) as remove,
         patch.object(tv.Tv, "sweep", AsyncMock(return_value={})) as sweep,
+        patch.object(tv.Tv, "remove_all", AsyncMock()) as remove_all,
     ):
-        yield {"install": install, "remove": remove, "sweep": sweep}
+        yield {"install": install, "remove": remove, "sweep": sweep, "remove_all": remove_all}
 
 
 async def _setup(
@@ -100,6 +108,8 @@ async def _setup(
 ) -> MockConfigEntry:
     aioclient_mock.get(f"{TV}/api/status", json={"overlay": None, "overlay_ready": True})
     aioclient_mock.put(f"{TV}/api/streaming-keys", json={"motn": True, "tmdb": True})
+    # Advancing the clock runs Luma's regular camera push too.
+    aioclient_mock.post(f"{TV}/api/cameras", json={"cameras": 0})
     data = {"host": HOST, "port": 5862, "token": "f" * 64, "device_id": DEVICE}
     if on:
         pair = await hass.async_add_executor_job(keys.generate_key)
@@ -192,6 +202,8 @@ async def test_options_turn_it_on_and_show_the_token_once(
     await hass.async_block_till_done()
     resp = await client.post(REQUEST, json={}, headers={DEV_TOKEN_HEADER: token})
     assert resp.status == 404
+    # Nothing expires session keys once it is off, so turning it off removes them all.
+    fake_tv["remove_all"].assert_called_once()
 
 
 async def test_approved_request_hands_out_once_then_releases(
@@ -301,18 +313,118 @@ async def test_tv_failure_is_reported(
     assert resp.status == 502 and (await resp.json())["error"] == "tv_unreachable"
 
 
-async def test_wrong_tokens_lock_the_endpoints(
+async def test_wrong_tokens_lock_out_only_that_client(
     hass: HomeAssistant, hass_client_no_auth, aioclient_mock, notify, fake_tv
 ):
     await _setup(hass, aioclient_mock)
     client = await hass_client_no_auth()
+    # Calls without a token are refused but never count towards a lockout.
+    for _ in range(BAD_TOKENS_PER_HOUR + 5):
+        resp = await client.post(REQUEST)
+        assert resp.status == 401
+    resp = await client.post(REQUEST, json={}, headers={DEV_TOKEN_HEADER: TOKEN})
+    assert resp.status == 202
     for _ in range(BAD_TOKENS_PER_HOUR):
         resp = await client.post(REQUEST, headers={DEV_TOKEN_HEADER: "wrong"})
         assert resp.status == 401
     resp = await client.post(REQUEST, headers={DEV_TOKEN_HEADER: TOKEN})
     assert resp.status == 429
     await hass.async_block_till_done()
-    assert notify[-1].data["title"] == "Luma developer access locked"
+    assert "Repeated wrong dev tokens" in notify[-1].data["message"]
+    # Another address is unaffected, and the phone hears at most once a day.
+    registry = hass.data[DATA]
+    assert list(registry.locked_until) == ["127.0.0.1"]
+    assert _authorize(hass, TOKEN, "192.0.2.9").entry.title == "Living room TV"
+    notices = len(notify)
+    registry.locked_until.clear()
+    for _ in range(BAD_TOKENS_PER_HOUR):
+        await client.post(REQUEST, headers={DEV_TOKEN_HEADER: "wrong"})
+    await hass.async_block_till_done()
+    assert len(notify) == notices
+
+
+async def test_unanswered_requests_expire_and_clear_the_notification(
+    hass: HomeAssistant, hass_client_no_auth, aioclient_mock, notify, fake_tv
+):
+    await _setup(hass, aioclient_mock)
+    client = await hass_client_no_auth()
+    headers = {DEV_TOKEN_HEADER: TOKEN}
+    resp = await client.post(REQUEST, json={}, headers=headers)
+    request_id = (await resp.json())["request_id"]
+    await hass.async_block_till_done()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=11))
+    await hass.async_block_till_done()
+    resp = await client.get(f"/api/luma/dev/result/{request_id}", headers=headers)
+    assert resp.status == 410 and (await resp.json())["error"] == "expired"
+    assert notify[-1].data["message"] == "clear_notification"
+
+
+async def test_any_install_failure_ends_the_request(
+    hass: HomeAssistant, hass_client_no_auth, aioclient_mock, notify, fake_tv
+):
+    await _setup(hass, aioclient_mock)
+    client = await hass_client_no_auth()
+    headers = {DEV_TOKEN_HEADER: TOKEN}
+    for error, code in (
+        (RuntimeError("connection lost"), "tv_unreachable"),
+        (tv.KeyRefused("refused"), "tv_refused_key"),
+    ):
+        fake_tv["install"].side_effect = error
+        resp = await client.post(REQUEST, json={}, headers=headers)
+        request_id = (await resp.json())["request_id"]
+        await hass.async_block_till_done()
+        hass.bus.async_fire(NOTIFICATION_EVENT, {"action": _action(notify[-1], "Approve")})
+        resp = await client.get(f"/api/luma/dev/result/{request_id}?wait=5", headers=headers)
+        assert resp.status == 502 and (await resp.json())["error"] == code
+    assert "authorized_keys" in notify[-1].data["message"]
+
+
+async def test_a_release_the_tv_missed_is_retried_by_the_sweep(
+    hass: HomeAssistant, hass_client_no_auth, aioclient_mock, notify, fake_tv
+):
+    entry = await _setup(hass, aioclient_mock)
+    client = await hass_client_no_auth()
+    headers = {DEV_TOKEN_HEADER: TOKEN}
+    resp = await client.post(REQUEST, json={}, headers=headers)
+    request_id = (await resp.json())["request_id"]
+    await hass.async_block_till_done()
+    hass.bus.async_fire(NOTIFICATION_EVENT, {"action": _action(notify[-1], "Approve")})
+    await client.get(f"/api/luma/dev/result/{request_id}?wait=5", headers=headers)
+    fake_tv["remove"].side_effect = tv.TvError("away")
+    resp = await client.post(f"/api/luma/dev/release/{request_id}", headers=headers)
+    assert resp.status == 200
+    broker = hass.data[DATA].brokers[entry.entry_id]
+    await broker._sweep()
+    assert fake_tv["sweep"].call_args.kwargs["remove"] == frozenset({request_id})
+    assert broker._pending_removal == set()
+
+
+async def test_forgetting_the_host_key_starts_access_again(
+    hass: HomeAssistant, aioclient_mock, notify, fake_tv
+):
+    entry = await _setup(hass, aioclient_mock)
+    before = hass.data[DATA].brokers[entry.entry_id]
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "developer_access"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            "dev_access": True,
+            "dev_access_phone": "mobile_app_phone",
+            "dev_access_ssh_port": 22,
+            "dev_access_tunnel_hostname": "tv.example.com",
+            "dev_access_cloudflare_client_id": "cf-id",
+            "dev_access_cloudflare_client_secret": "cf-secret",
+            "dev_access_forget_host_key": True,
+        },
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    after = hass.data[DATA].brokers.get(entry.entry_id)
+    assert after is not None and after is not before
+    fake_tv["remove_all"].assert_not_called()
 
 
 async def test_rate_limits(

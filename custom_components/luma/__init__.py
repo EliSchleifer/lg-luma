@@ -165,11 +165,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: LumaConfigEntry) -> bool
 
 
 async def _options_updated(hass: HomeAssistant, entry: LumaConfigEntry) -> None:
-    await dev_access.async_update(hass, entry)
     await _push_keys(entry)
     # Only when phone typing is on, or was: turning it off tells the TV to stop calling.
     if keyboard.phones(entry) or entry.runtime_data.keyboard:
         await keyboard.register(hass, entry, entry.runtime_data.client, partial(local_url, hass))
+    # Last, so nothing in developer access can hold up the keys or phone typing.
+    await dev_access.async_update(hass, entry)
 
 
 async def _push_keys(entry: LumaConfigEntry) -> None:
@@ -272,6 +273,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     of what the TV reported goes too."""
     await events_store(hass, entry.entry_id).async_remove()
     versions.remove(hass, entry)
+    await dev_access.async_revoke_removed(hass, entry)
     client = LumaClient(
         async_get_clientsession(hass),
         entry.data[CONF_HOST],

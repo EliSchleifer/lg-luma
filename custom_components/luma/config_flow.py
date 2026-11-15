@@ -270,6 +270,8 @@ class LumaOptionsFlow(OptionsFlow):
                 if user_input.get(CONF_FORGET_HOST_KEY):
                     await dev_access.async_stop(self.hass, entry)
                     await dev_access.forget_host_key(self.hass, entry)
+                    # Start again now: unchanged options would not call the update listener.
+                    await dev_access.async_update(self.hass, entry)
                 new_token = on and (
                     user_input.get(CONF_ROTATE_TOKEN) or not entry.data.get(CONF_DEV_TOKEN_HASH)
                 )

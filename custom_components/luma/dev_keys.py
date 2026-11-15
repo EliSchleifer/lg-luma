@@ -97,16 +97,19 @@ def rewrite(
     add: str | None = None,
     remove: frozenset[str] | set[str] = frozenset(),
     now: float | None = None,
+    remove_all: bool = False,
 ) -> tuple[str, dict[str, int]]:
-    """authorized_keys with session keys in `remove` (and, given `now`, expired ones) dropped and
-    `add` appended. Returns the new content and the session keys left, id → expiry."""
+    """authorized_keys with session keys in `remove` (and, given `now`, expired ones; with
+    `remove_all`, every one) dropped and `add` appended. Returns the new content and the session
+    keys left, id → expiry."""
     kept: list[str] = []
     remaining: dict[str, int] = {}
     for line in content.splitlines():
         tag = parse_tag(line)
         if tag is not None:
             request_id, expires_at = tag
-            if request_id in remove or (now is not None and expires_at <= now):
+            expired = now is not None and expires_at <= now
+            if remove_all or request_id in remove or expired:
                 continue
             remaining[request_id] = expires_at
         kept.append(line)
