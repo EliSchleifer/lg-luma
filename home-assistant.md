@@ -94,7 +94,8 @@ you are watching.
 ## Cameras app
 
 While **Home Assistant** is on, Luma lists a **Cameras** app with your other apps. Favorite it to
-keep it on Home. Opening it shows every camera entity Home Assistant has (unavailable ones are
+keep it on Home. Opening it shows every camera entity Home Assistant has (Frigate's, which repeat cameras another
+integration already provides, start hidden; unavailable ones are
 skipped, at most 32) in a grid of snapshots that refresh every couple of seconds. Choose a camera
 and press **OK** to see it full screen as live video; **Back** returns to the grid, and **Back**
 again closes it.
@@ -102,12 +103,32 @@ again closes it.
 Full screen, a camera that can stream (most RTSP cameras: Generic, ONVIF, Reolink, UniFi Protect
 and others) plays Home Assistant's HLS stream: the camera's own video at its full frame rate,
 decoded by the TV, a second or two behind real time. This needs Home Assistant's **Stream**
-integration, which `default_config` includes. The video starts within a few seconds; to make it
-start at once for a camera you open often, turn on **Preload stream** in that camera entity's
-settings in Home Assistant, which keeps its stream running. Other cameras, and any camera while its stream is
+integration, which `default_config` includes. Other cameras, and any camera while its stream is
 starting or if it cannot play, show Home Assistant's motion-JPEG stream, which for most camera
 types is only about two pictures a second. Its badge says **Live** or **Snapshots**: if that
 stream fails or freezes, Luma switches to snapshots, several a second.
+
+On TVs with LG's direct video decoder (webOS 5 and later), Luma plays the camera's own video
+itself instead: Home Assistant passes the camera's stream straight on, starting from its last
+keyframe, so the picture appears almost at once. This video has no sound yet. If it cannot play,
+Luma uses the HLS stream described here.
+
+Home Assistant needs a few seconds to connect to a camera and prepare its first video, so Luma
+asks it to start as soon as a camera is focused in the grid: a camera you rest on for several
+seconds before pressing **OK** goes live almost at once. Two Home Assistant settings shorten the
+wait further:
+
+- Shorter video segments. Home Assistant offers no video until one whole segment is ready, six
+  seconds by default. In `configuration.yaml`, then restart Home Assistant:
+
+  ```yaml
+  stream:
+    segment_duration: 2
+  ```
+
+- **Preload stream**, in a camera entity's settings in Home Assistant, keeps that camera's
+  stream running all the time, so it is always ready. This uses Home Assistant's processor and
+  network continuously; choose it for the cameras you open most.
 
 ### Rewinding and history
 
@@ -247,9 +268,13 @@ on your phone, Luma can ask you for the text instead:
 2. On the TV, open a text field: app search, Movies & shows search, a weather location, your name
    or a new name for an input
    or camera.
-3. The phones get a notification from the TV. Reply to it (on iPhone, press and hold it or swipe
-   down; on Android, tap **Type**), type, and send. The text goes into the field, and the TV's
-   keyboard closes.
+3. The phones get a notification from the TV. Tap it: the Home Assistant app opens on a page with
+   one text box. Type and send. The text goes into the field, and the TV's keyboard closes.
+   To stay out of the app, reply to the notification instead (on iPhone, press and hold it or
+   swipe down; on Android, tap **Type**).
+
+The page is `/luma-keyboard` in Home Assistant, for any signed-in user. It is not in the sidebar,
+but you can open it by hand or link to it from a dashboard; with several TVs it lets you choose one.
 
 Closing the field on the TV clears the notification. On Android the notifications have their own
 **Luma keyboard** channel, so you can change their sound or silence them in the phone's settings.

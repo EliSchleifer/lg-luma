@@ -1,7 +1,7 @@
 {
   "domain": "luma",
   "name": "Luma for LG webOS",
-  "after_dependencies": ["camera", "http", "mobile_app", "webostv"],
+  "after_dependencies": ["camera", "frontend", "http", "mobile_app", "webostv"],
   "codeowners": [],
   "config_flow": true,
   "dependencies": ["webhook"],
@@ -11,5 +11,5 @@
   "issue_tracker": "https://github.com/elischleifer-trunk/lg-luma/issues",
   "requirements": [],
   "ssdp": [{ "st": "urn:lge-com:service:webos-second-screen:1" }],
-  "version": "2.29.0"
+  "version": "2.30.0"
 }
