@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -464,3 +465,40 @@ async def test_diagnostics_redact_developer_access_secrets(
     text = str(result)
     assert "BEGIN OPENSSH" not in text and keys.token_hash(TOKEN) not in text
     assert "cf-secret" not in text
+
+
+async def test_wrong_token_bookkeeping_stays_bounded(
+    hass: HomeAssistant, aioclient_mock, notify, fake_tv
+):
+    from custom_components.luma.dev_access import MAX_TRACKED_CLIENTS, DevAccessError
+
+    await _setup(hass, aioclient_mock)
+    registry = hass.data[DATA]
+    for n in range(MAX_TRACKED_CLIENTS + 50):
+        with pytest.raises(DevAccessError):
+            _authorize(hass, "wrong", f"2001:db8::{n:x}")
+    assert len(registry.bad_tokens) <= MAX_TRACKED_CLIENTS
+    # Failures older than an hour and lockouts that ended are forgotten on the next call.
+    registry.bad_tokens.clear()
+    registry.bad_tokens["192.0.2.1"] = deque([time.time() - 7200])
+    registry.locked_until["192.0.2.2"] = time.time() - 1
+    assert _authorize(hass, TOKEN, "192.0.2.3").entry.title == "Living room TV"
+    assert registry.bad_tokens == {} and registry.locked_until == {}
+
+
+async def test_deleting_the_entry_removes_keys_or_says_what_is_left(
+    hass: HomeAssistant, aioclient_mock, notify, fake_tv
+):
+    entry = await _setup(hass, aioclient_mock)
+    aioclient_mock.delete(f"{TV}/api/pair", json={})
+    assert await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    fake_tv["remove_all"].assert_called_once()
+
+    fake_tv["remove_all"].side_effect = tv.TvError("standby")
+    entry = await _setup(hass, aioclient_mock)
+    with patch("custom_components.luma.dev_access.persistent_notification.async_create") as created:
+        assert await hass.config_entries.async_remove(entry.entry_id)
+        await hass.async_block_till_done()
+    message = created.call_args.args[1]
+    assert "luma-dev:" in message and "authorized_keys" in message

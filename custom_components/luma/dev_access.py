@@ -28,6 +28,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
+from homeassistant.components import persistent_notification
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST
@@ -72,6 +73,8 @@ MAX_PENDING = 2
 # Wrong tokens per rolling hour before the endpoints lock for an hour.
 BAD_TOKENS_PER_HOUR = 10
 LOCKOUT = 3600
+# Addresses tracked for wrong tokens at most; the oldest are forgotten first.
+MAX_TRACKED_CLIENTS = 1024
 # How long a result request may wait for the owner's answer.
 MAX_WAIT = 30
 SWEEP_INTERVAL = timedelta(minutes=15)
@@ -165,8 +168,13 @@ async def async_stop(hass: HomeAssistant, entry: ConfigEntry, *, revoke: bool = 
 
 
 async def async_revoke_removed(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """The entry is being deleted: take its session keys off the TV, best effort."""
-    if not entry.data.get(CONF_DEV_KEY) or not await _requirements(hass):
+    """The entry is being deleted: take its session keys off the TV. Its management key goes
+    with the entry, so a failure cannot be retried later: the owner is told what to remove."""
+    if not entry.data.get(CONF_DEV_KEY):
+        return
+    if not await _requirements(hass):
+        _left_on_tv(hass, entry, "asyncssh is not installed")
+        await _store(hass, entry).async_remove()
         return
     try:
         from . import dev_tv
@@ -181,7 +189,20 @@ async def async_revoke_removed(hass: HomeAssistant, entry: ConfigEntry) -> None:
         await tv.remove_all()
     except Exception as err:
         _LOGGER.warning("Could not remove developer access keys from the TV: %s", err)
+        _left_on_tv(hass, entry, str(err))
     await _store(hass, entry).async_remove()
+
+
+def _left_on_tv(hass: HomeAssistant, entry: ConfigEntry, reason: str) -> None:
+    persistent_notification.async_create(
+        hass,
+        f"Luma was removed for {entry.title}, but Home Assistant could not take its developer "
+        f"access keys off the TV ({reason}). Approved sessions may still be able to log in. On "
+        "the TV, delete every line containing `luma-dev:` from "
+        "`/home/root/.ssh/authorized_keys`, and the line ending in `luma-dev-manager`.",
+        title="Remove developer access keys from the TV",
+        notification_id=f"{DOMAIN}_dev_access_{entry.entry_id}",
+    )
 
 
 async def _requirements(hass: HomeAssistant) -> bool:
@@ -225,6 +246,20 @@ def _registry(hass: HomeAssistant) -> _Registry:
     return hass.data[DATA]
 
 
+def _prune(registry: _Registry, now: float) -> None:
+    """Forget failures older than an hour and lockouts that ended, and keep at most
+    MAX_TRACKED_CLIENTS addresses, so unauthenticated callers cannot grow memory."""
+    for client in [c for c, f in registry.bad_tokens.items() if not f or f[-1] < now - 3600]:
+        del registry.bad_tokens[client]
+    for client in [c for c, until in registry.locked_until.items() if until <= now]:
+        del registry.locked_until[client]
+    for table in (registry.bad_tokens, registry.locked_until):
+        # Dicts keep insertion order: the first keys are the oldest. Leave room for the one
+        # this call may add.
+        while len(table) >= MAX_TRACKED_CLIENTS:
+            del table[next(iter(table))]
+
+
 def _authorize(hass: HomeAssistant, token: str | None, client: str) -> Broker:
     """The broker whose TV this token belongs to. Calls without a token are refused without
     counting; ten wrong tokens in an hour lock out that client address only, and the phone
@@ -233,6 +268,7 @@ def _authorize(hass: HomeAssistant, token: str | None, client: str) -> Broker:
     if not registry.brokers:
         raise DevAccessError(404, "not_found")
     now = time.time()
+    _prune(registry, now)
     if now < registry.locked_until.get(client, 0.0):
         raise DevAccessError(429, "locked")
     if not token:
