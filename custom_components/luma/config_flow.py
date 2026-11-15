@@ -202,7 +202,8 @@ class LumaConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_DEVICE_ID: self._device_id,
         }
         if self.source == "reauth":
-            return self.async_update_reload_and_abort(self._get_reauth_entry(), data=data)
+            # Merge: entry.data also holds the webhook ID and developer access keys.
+            return self.async_update_reload_and_abort(self._get_reauth_entry(), data_updates=data)
         return self.async_create_entry(title=self._title or f"Luma ({self._host})", data=data)
 
     async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
