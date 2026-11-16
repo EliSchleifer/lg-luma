@@ -325,6 +325,9 @@ def _track_cameras(hass: HomeAssistant, entry: LumaConfigEntry, client: LumaClie
         try:
             status = await client.status()
         except LumaError:
+            # A TV that went off with a text field open never reports it closing: stop
+            # offering the TV keyboard until it answers again.
+            keyboard.forget_field(hass, entry)
             return
         entry.runtime_data.compatibility.status(status)
         if not pending and status.get("cameras") == 0 and camera_list(hass):

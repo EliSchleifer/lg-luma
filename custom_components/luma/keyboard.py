@@ -87,6 +87,14 @@ def signal(entry_id: str) -> str:
     return f"{DOMAIN}_keyboard_{entry_id}"
 
 
+@callback
+def forget_field(hass: HomeAssistant, entry: LumaConfigEntry) -> None:
+    """The TV cannot be reached, so no field is open as far as Home Assistant can tell."""
+    if entry.runtime_data.field is not None:
+        entry.runtime_data.field = None
+        async_dispatcher_send(hass, signal(entry.entry_id))
+
+
 def prompt(field: str | None) -> str | None:
     return PROMPTS.get(field or "", "Text") if field is not None else None
 
