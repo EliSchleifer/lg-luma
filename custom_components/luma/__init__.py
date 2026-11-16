@@ -61,6 +61,7 @@ from homeassistant.util import dt as dt_util
 from . import dev_access, keyboard, streaming_keys, versions
 from .api import LumaAuthError, LumaClient, LumaError
 from .const import (
+    CONF_DEVICE_ID,
     CONF_TOKEN,
     CONF_WEBHOOK_ID,
     DEFAULT_PORT,
@@ -163,6 +164,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: LumaConfigEntry) -> bool
     entry.runtime_data = LumaData(
         client, events, compatibility, dev_entities=dev_access.enabled(entry)
     )
+    if not entry.runtime_data.dev_entities:
+        _remove_dev_entities(hass, entry)
     keyboard.setup(hass, entry, client)
     if keyboard.phones(entry):
         entry.async_create_background_task(
@@ -183,6 +186,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: LumaConfigEntry) -> bool
     # After the platforms, so the TV's device exists for the first events' device_id.
     await events.async_start()
     return True
+
+
+# Developer access entities, by platform: removed from the registry while it is off, so the
+# device page does not keep them as "no longer provided".
+DEV_ENTITIES = {
+    "sensor": ("dev_access",),
+    "button": ("dev_access_approve", "dev_access_deny", "dev_access_revoke"),
+}
+
+
+def _remove_dev_entities(hass: HomeAssistant, entry: LumaConfigEntry) -> None:
+    registry = er.async_get(hass)
+    device_id = entry.data[CONF_DEVICE_ID]
+    for platform, keys in DEV_ENTITIES.items():
+        for key in keys:
+            if entity_id := registry.async_get_entity_id(platform, DOMAIN, f"{device_id}_{key}"):
+                registry.async_remove(entity_id)
 
 
 async def _options_updated(hass: HomeAssistant, entry: LumaConfigEntry) -> None:

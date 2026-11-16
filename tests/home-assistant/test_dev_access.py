@@ -645,7 +645,9 @@ async def test_device_page_entities_follow_the_setting(
     assert off["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done(wait_background_tasks=True)
     fake_tv["remove_all"].assert_called_once()  # turning off takes the keys off the TV
-    assert hass.states.get(sensor) is None or hass.states.get(sensor).state == "unavailable"
+    # Gone from the registry too, not left behind as "no longer provided".
+    assert _entity(hass, "sensor", "dev_access") is None
+    assert _entity(hass, "button", "dev_access_revoke") is None
 
 
 async def _setup_options(hass: HomeAssistant, entry: MockConfigEntry, on: bool):
@@ -657,3 +659,79 @@ async def _setup_options(hass: HomeAssistant, entry: MockConfigEntry, on: bool):
     if on:
         form["dev_access_phone"] = "mobile_app_phone"
     return await hass.config_entries.options.async_configure(result["flow_id"], form)
+
+
+def test_reasons_are_shown_literally_in_notifications():
+    from custom_components.luma.dev_access import markdown_escape
+
+    crafted = "x** [Approve here](https://evil.example) **"
+    escaped = markdown_escape(crafted)
+    assert "[" not in escaped.replace("\\[", "")
+    assert "](" not in escaped
+    assert escaped.replace("\\", "") == crafted
+
+
+async def test_home_assistant_notice_even_without_the_phone(
+    hass: HomeAssistant, hass_client_no_auth, aioclient_mock, fake_tv
+):
+    # No notify.mobile_app_phone service at all: the phone cannot be reached.
+    await _setup(hass, aioclient_mock)
+    client = await hass_client_no_auth()
+    with patch("custom_components.luma.dev_access.persistent_notification.async_create") as created:
+        resp = await client.post(
+            REQUEST,
+            json={"reason": "[click](https://evil.example)"},
+            headers={DEV_TOKEN_HEADER: TOKEN},
+        )
+    assert resp.status == 202
+    message = created.call_args.args[1]
+    assert "\\[click\\]\\(https://evil\\.example\\)" in message
+    assert message.count("](") == 1  # only the device link
+
+
+async def test_history_is_finished_for_requests_from_before_a_restart(
+    hass: HomeAssistant, hass_client_no_auth, aioclient_mock, notify, fake_tv
+):
+    entry = await _setup(hass, aioclient_mock)
+    client = await hass_client_no_auth()
+    headers = {DEV_TOKEN_HEADER: TOKEN}
+    resp = await client.post(REQUEST, json={"reason": "approved"}, headers=headers)
+    approved = (await resp.json())["request_id"]
+    await hass.async_block_till_done()
+    await _press(hass, "dev_access_approve")
+    await client.get(f"/api/luma/dev/result/{approved}?wait=5", headers=headers)
+    await client.post(REQUEST, json={"reason": "left waiting"}, headers=headers)
+    await hass.async_block_till_done()
+
+    # After a reload the session key is still on the TV; the waiting request is gone.
+    fake_tv["sweep"].return_value = {approved: int(time.time()) + 3600}
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    sensor = _entity(hass, "sensor", "dev_access")
+    by_reason = {r["reason"]: r for r in hass.states.get(sensor).attributes["requests"]}
+    assert by_reason["left waiting"]["state"] == "expired"
+    assert by_reason["approved"]["state"] == "active"
+    assert hass.states.get(sensor).state == "active"
+
+    await _press(hass, "dev_access_revoke")
+    await hass.async_block_till_done()
+    by_reason = {r["reason"]: r for r in hass.states.get(sensor).attributes["requests"]}
+    assert by_reason["approved"]["state"] == "revoked"
+    assert hass.states.get(sensor).state == "idle"
+
+
+async def test_a_key_the_tv_missed_removing_still_shows_active(
+    hass: HomeAssistant, hass_client_no_auth, aioclient_mock, notify, fake_tv
+):
+    await _setup(hass, aioclient_mock)
+    client = await hass_client_no_auth()
+    headers = {DEV_TOKEN_HEADER: TOKEN}
+    resp = await client.post(REQUEST, json={}, headers=headers)
+    request_id = (await resp.json())["request_id"]
+    await hass.async_block_till_done()
+    await _press(hass, "dev_access_approve")
+    await client.get(f"/api/luma/dev/result/{request_id}?wait=5", headers=headers)
+    fake_tv["remove"].side_effect = tv.TvError("away")
+    await client.post(f"/api/luma/dev/release/{request_id}", headers=headers)
+    await hass.async_block_till_done()
+    assert hass.states.get(_entity(hass, "sensor", "dev_access")).state == "active"

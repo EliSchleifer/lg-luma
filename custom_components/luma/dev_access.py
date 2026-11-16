@@ -356,6 +356,14 @@ class Request:
             self.on_change(self)
 
 
+_MARKDOWN = set("\\`*_{}[]()<>#+-.!|~")
+
+
+def markdown_escape(text: str) -> str:
+    """Text shown literally in Markdown (Home Assistant notifications render it)."""
+    return "".join(f"\\{ch}" if ch in _MARKDOWN else ch for ch in text)
+
+
 def clean_reason(reason: Any) -> str:
     text = "".join(ch if ch.isprintable() else " " for ch in str(reason or ""))
     return " ".join(text.split())[:200] or "(no reason given)"
@@ -388,6 +396,10 @@ class Broker:
         self._dev_tv = dev_tv
         stored = await self._store.async_load() or {}
         self.history = {item["key"]: item for item in stored.get("history") or []}
+        # Requests do not survive a restart: one still waiting can no longer be answered.
+        for request_id, item in self.history.items():
+            if item["state"] in (PENDING, INSTALLING):
+                self._finish_history(request_id, EXPIRED)
         self.tv = dev_tv.Tv(
             self.entry.data[CONF_HOST],
             int(self.entry.options.get(CONF_DEV_SSH_PORT) or DEFAULT_SSH_PORT),
@@ -406,6 +418,9 @@ class Broker:
             try:
                 await self.tv.remove_all()
                 self._pending_removal.clear()
+                for request_id, item in self.history.items():
+                    if item["state"] == "active":
+                        self._finish_history(request_id, REVOKED)
                 await self._save()
             except self._dev_tv.TvError as err:
                 _LOGGER.warning("Could not remove developer access keys from the TV: %s", err)
@@ -455,7 +470,8 @@ class Broker:
     def state(self) -> str:
         if any(r.state in (PENDING, INSTALLING) for r in self._requests.values()):
             return "pending"
-        return "active" if self._key_expiry else "idle"
+        # A key whose removal the TV missed is still usable until a sweep removes it.
+        return "active" if self._key_expiry or self._pending_removal else "idle"
 
     @property
     def active_until(self) -> datetime | None:
@@ -476,6 +492,16 @@ class Broker:
             del self.history[next(iter(self.history))]
         if request.state != PENDING:
             persistent_notification.async_dismiss(self.hass, self._notice_id(request))
+        self._store.async_delay_save(self._data, 1)
+        async_dispatcher_send(self.hass, signal(self.entry.entry_id))
+
+    @callback
+    def _finish_history(self, request_id: str, state: str) -> None:
+        """Give a history entry whose request is gone (after a restart) its final state."""
+        item = self.history.get(request_id)
+        if item is None or item["state"] in FINISHED:
+            return
+        item["state"] = state
         self._store.async_delay_save(self._data, 1)
         async_dispatcher_send(self.hass, signal(self.entry.entry_id))
 
@@ -538,23 +564,28 @@ class Broker:
 
         request.timer = async_call_later(self.hass, PENDING_TIMEOUT, _expire)
         hours = f"{seconds / 3600:g} h" if seconds >= 3600 else f"{seconds // 60} min"
-        await self.notify(
-            f"Cloud session wants SSH access to {self.entry.title}",
-            f"{request.reason}\nAccess for {hours}.",
-            tag=self._tag(request),
-            actions=[
-                {"action": ACTION_APPROVE + request.nonce, "title": "Approve"},
-                {"action": ACTION_DENY + request.nonce, "title": "Deny", "destructive": True},
-            ],
-        )
+        # The Home Assistant notice first, so a missing phone service cannot stop it. The
+        # reason comes from the session: escaped, so the device link is the only link shown.
         persistent_notification.async_create(
             self.hass,
-            f"**{request.reason}**\n\nAccess for {hours}. Approve or deny it on your phone, or "
-            f"with the buttons on [{self.entry.title}]({self._device_link()}). Unanswered "
-            "requests expire after 10 minutes.",
+            f"{markdown_escape(request.reason)}\n\nAccess for {hours}. Approve or deny it on "
+            f"your phone, or with the buttons on [{markdown_escape(self.entry.title)}]"
+            f"({self._device_link()}). Unanswered requests expire after 10 minutes.",
             title="Cloud session wants SSH access to the TV",
             notification_id=self._notice_id(request),
         )
+        try:
+            await self.notify(
+                f"Cloud session wants SSH access to {self.entry.title}",
+                f"{request.reason}\nAccess for {hours}.",
+                tag=self._tag(request),
+                actions=[
+                    {"action": ACTION_APPROVE + request.nonce, "title": "Approve"},
+                    {"action": ACTION_DENY + request.nonce, "title": "Deny", "destructive": True},
+                ],
+            )
+        except Exception as err:
+            _LOGGER.warning("Could not notify the approving phone: %s", err)
         _LOGGER.info("Developer access request %s: %s", request.id[:6], request.reason)
         return request
 
@@ -621,6 +652,9 @@ class Broker:
             if request.state in KEY_ON_TV:
                 request.payload = None
                 request.set_state(REVOKED)
+        for request_id, item in self.history.items():
+            if item["state"] == "active":
+                self._finish_history(request_id, REVOKED)
         await self._save()
         async_dispatcher_send(self.hass, signal(self.entry.entry_id))
         _LOGGER.info("Revoked all developer access keys on %s", self.entry.title)
@@ -756,6 +790,8 @@ class Broker:
             if request and request.state in KEY_ON_TV:
                 request.payload = None
                 request.set_state(EXPIRED)
+            else:
+                self._finish_history(request_id, EXPIRED)
             self._background(self._remove_key(request_id))
 
         delay = max(0.0, expires_at - time.time())
@@ -774,6 +810,7 @@ class Broker:
             _LOGGER.warning("Could not remove session key %s yet: %s", request_id[:6], err)
             self._pending_removal.add(request_id)
             await self._save()
+            async_dispatcher_send(self.hass, signal(self.entry.entry_id))
 
     async def _interval_sweep(self, _now: datetime) -> None:
         await self._sweep()
@@ -793,6 +830,9 @@ class Broker:
         for request_id, expires_at in remaining.items():
             if request_id not in self._key_timers:
                 self._schedule_removal(request_id, expires_at)
+        for request_id, item in self.history.items():
+            if item["state"] == "active" and request_id not in remaining:
+                self._finish_history(request_id, EXPIRED)
         async_dispatcher_send(self.hass, signal(self.entry.entry_id))
 
     async def notify(
