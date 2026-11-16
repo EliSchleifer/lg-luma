@@ -1298,6 +1298,23 @@ async def test_tv_keyboard_entity_types_into_the_open_field(
     await hass.async_block_till_done()
     assert hass.states.get(entity_id).state == "unavailable"
 
+    # Back with the hook still held and the field still open: the field is read back.
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(
+        f"{TV}/api/status", json={"overlay": None, "cameras": 0, "keyboard_hook": True}
+    )
+    aioclient_mock.put(f"{TV}/api/keyboard", json={"keyboard": "search"})
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=4))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).attributes["field"] == "search"
+
+    # A TV that answers with an error is still there: its field stays.
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{TV}/api/status", status=500, json={"error": "Busy"})
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=6))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).attributes["field"] == "search"
+
     # Off again: the TV stops reporting and the entity goes from the registry.
     aioclient_mock.clear_requests()
     aioclient_mock.put(f"{TV}/api/keyboard", json={"keyboard": None})

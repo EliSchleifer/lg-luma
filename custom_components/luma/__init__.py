@@ -59,7 +59,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
 
 from . import dev_access, keyboard, streaming_keys, versions
-from .api import LumaAuthError, LumaClient, LumaError
+from .api import LumaAuthError, LumaClient, LumaConnectionError, LumaError
 from .const import (
     CONF_DEVICE_ID,
     CONF_TOKEN,
@@ -290,6 +290,8 @@ def camera_list(hass: HomeAssistant) -> list[dict[str, Any]]:
 def _track_cameras(hass: HomeAssistant, entry: LumaConfigEntry, client: LumaClient) -> None:
     """Send the TV the camera list now and after camera changes, coalescing bursts."""
     pending = False
+    # A field forgotten while the TV was away is read back when it answers again.
+    forgotten = False
 
     async def push() -> None:
         nonlocal pending
@@ -322,19 +324,28 @@ def _track_cameras(hass: HomeAssistant, entry: LumaConfigEntry, client: LumaClie
         # The same status says whether the TV lost or replaced the streaming search keys, and
         # which Luma it runs: an update shows on the device page, or calls for one in Repairs.
         # Whether the TV still holds the keyboard webhook, after a restart or turning it off.
+        nonlocal forgotten
+        field = entry.runtime_data.field
         try:
             status = await client.status()
-        except LumaError:
+        except LumaConnectionError:
             # A TV that went off with a text field open never reports it closing: stop
-            # offering the TV keyboard until it answers again.
-            keyboard.forget_field(hass, entry)
+            # offering the TV keyboard until it answers again. A field the TV reported while
+            # this check waited is newer than the failure, so it stays.
+            if entry.runtime_data.field == field and field is not None:
+                keyboard.forget_field(hass, entry)
+                forgotten = True
             return
+        except LumaError:
+            return  # The TV answered: whatever field it reported still stands.
         entry.runtime_data.compatibility.status(status)
         if not pending and status.get("cameras") == 0 and camera_list(hass):
             schedule()
         if streaming_keys.needs_push(dict(entry.options), status):
             await _push_keys(entry)
-        if keyboard.needs_register(entry, status):
+        if keyboard.needs_register(entry, status) or (forgotten and keyboard.wanted(entry)):
+            # Registering again also reads back the field the TV holds open, if any.
+            forgotten = False
             await keyboard.register(hass, entry, client, partial(local_url, hass))
 
     entry.async_on_unload(hass.bus.async_listen(EVENT_STATE_CHANGED, changed, is_camera))
