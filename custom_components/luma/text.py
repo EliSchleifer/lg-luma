@@ -17,7 +17,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import LumaConfigEntry, keyboard
-from .api import LumaApiError, LumaError
+from .api import LumaApiError, LumaAuthError, LumaError
 from .entity import LumaEntity
 
 
@@ -66,6 +66,10 @@ class LumaKeyboardText(LumaEntity, TextEntity):
             return
         try:
             await self._entry.runtime_data.client.type_text(text)
+        except LumaAuthError as err:
+            # The TV no longer knows this server: ask to pair again, as the buttons do.
+            self._entry.async_start_reauth(self.hass)
+            raise HomeAssistantError("Luma no longer knows this server; pair again") from err
         except LumaApiError as err:
             if err.status == 409:
                 raise HomeAssistantError("No text field is open on the TV") from err

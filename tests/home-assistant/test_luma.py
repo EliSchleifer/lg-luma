@@ -1278,6 +1278,43 @@ async def test_tv_keyboard_entity_types_into_the_open_field(
     await hass.async_block_till_done()
     assert hass.states.get(entity_id).state == "unavailable"
 
+    # A TV that no longer knows this server asks to pair again instead of "unreachable".
+    await client.post(f"/api/webhook/{webhook_id}", json={"open": True, "field": "search"})
+    await hass.async_block_till_done()
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(f"{TV}/api/keyboard/text", status=401, json={"error": "Pair again"})
+    with pytest.raises(HomeAssistantError, match="pair again"):
+        await hass.services.async_call(
+            "text", "set_value", {"entity_id": entity_id, "value": "Alien"}, blocking=True
+        )
+    await hass.async_block_till_done()
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert [flow["context"]["source"] for flow in flows] == ["reauth"]
+
+    # A TV that drops off with a field open stops offering the keyboard at the next check.
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{TV}/api/status", exc=TimeoutError)
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=2))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "unavailable"
+
+    # Back with the hook still held and the field still open: the field is read back.
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(
+        f"{TV}/api/status", json={"overlay": None, "cameras": 0, "keyboard_hook": True}
+    )
+    aioclient_mock.put(f"{TV}/api/keyboard", json={"keyboard": "search"})
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=4))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).attributes["field"] == "search"
+
+    # A TV that answers with an error is still there: its field stays.
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{TV}/api/status", status=500, json={"error": "Busy"})
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=6))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).attributes["field"] == "search"
+
     # Off again: the TV stops reporting and the entity goes from the registry.
     aioclient_mock.clear_requests()
     aioclient_mock.put(f"{TV}/api/keyboard", json={"keyboard": None})
