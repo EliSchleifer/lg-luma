@@ -193,4 +193,21 @@ await sharp(path.join(source, 'app-icon.svg'))
   .resize(130, 130)
   .png()
   .toFile(path.join(out, 'app-icon-large.png'));
+// Home Assistant (2026.3+) and HACS show a custom integration's icon from its own `brand/` folder:
+// a square PNG on a transparent background, trimmed to the artwork. These are committed, since HACS
+// installs the integration straight from the repository.
+const brand = path.join(root, 'custom_components/luma/brand');
+await fs.mkdir(brand, { recursive: true });
+const trimmed = await sharp(path.join(source, 'app-icon.svg'), { density: 72 * 8 })
+  .trim()
+  .toBuffer();
+for (const [file, size] of [
+  ['icon.png', 256],
+  ['icon@2x.png', 512],
+]) {
+  await sharp(trimmed)
+    .resize(size, size, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .png({ compressionLevel: 9 })
+    .toFile(path.join(brand, file));
+}
 console.log(`Native artwork ready: ${path.relative(root, out)}`);
