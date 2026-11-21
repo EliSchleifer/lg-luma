@@ -369,6 +369,14 @@ def clean_reason(reason: Any) -> str:
     return " ".join(text.split())[:200] or "(no reason given)"
 
 
+async def caller_is_owner(hass: HomeAssistant, user_id: str | None) -> bool:
+    """True only for the Home Assistant owner. That account is the only one that may decide."""
+    if not user_id:
+        return False
+    user = await hass.auth.async_get_user(user_id)
+    return bool(user and user.is_owner)
+
+
 class Broker:
     """One TV's access requests and the session keys on it."""
 
@@ -564,16 +572,8 @@ class Broker:
 
         request.timer = async_call_later(self.hass, PENDING_TIMEOUT, _expire)
         hours = f"{seconds / 3600:g} h" if seconds >= 3600 else f"{seconds // 60} min"
-        # The Home Assistant notice first, so a missing phone service cannot stop it. The
-        # reason comes from the session: escaped, so the device link is the only link shown.
-        persistent_notification.async_create(
-            self.hass,
-            f"{markdown_escape(request.reason)}\n\nAccess for {hours}. Approve or deny it on "
-            f"your phone, or with the buttons on [{markdown_escape(self.entry.title)}]"
-            f"({self._device_link()}). Unanswered requests expire after 10 minutes.",
-            title="Cloud session wants SSH access to the TV",
-            notification_id=self._notice_id(request),
-        )
+        # The reason goes only to the owner's phone. A persistent notification would show
+        # the request to every person who can open Home Assistant.
         try:
             await self.notify(
                 f"Cloud session wants SSH access to {self.entry.title}",
@@ -616,7 +616,16 @@ class Broker:
             return
         request = next((r for r in self._requests.values() if r.nonce == nonce), None)
         if request is not None:
-            self.decide(request, approve=approve, by="phone")
+            self.hass.async_create_task(
+                self._decide_from_phone(request, approve, event.context.user_id)
+            )
+
+    async def _decide_from_phone(self, request: Request, approve: bool, user_id: str | None) -> None:
+        """The phone action is only honored for the owner. Anyone else's tap is ignored."""
+        if not await caller_is_owner(self.hass, user_id):
+            _LOGGER.warning("Ignored a developer access decision from someone other than the owner")
+            return
+        self.decide(request, approve=approve, by="phone")
 
     @callback
     def decide(self, request: Request, *, approve: bool, by: str) -> bool:

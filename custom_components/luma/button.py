@@ -85,8 +85,8 @@ class LumaExampleToastButton(LumaButton):
 
 
 class LumaDevButton(LumaEntity, ButtonEntity):
-    """Developer access, from the TV's device page. Pressing needs a Home Assistant login,
-    like any button, so it is as trusted as the Approve on the owner's phone."""
+    """Developer access, from the TV's device page. Approve and deny are refused unless the
+    press comes from the Home Assistant owner."""
 
     def __init__(self, entry: LumaConfigEntry, key: str) -> None:
         super().__init__(entry, key)
@@ -123,6 +123,10 @@ class LumaDevDecisionButton(LumaDevButton):
         return broker is not None and broker.oldest_pending() is not None
 
     async def async_press(self) -> None:
+        context = self._context
+        user_id = context.user_id if context is not None else None
+        if not await dev_access.caller_is_owner(self.hass, user_id):
+            raise HomeAssistantError("Only Eli can approve or deny developer access to the TV")
         broker = self._broker
         request = broker.oldest_pending() if broker else None
         if broker is None or request is None:
