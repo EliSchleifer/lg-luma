@@ -69,10 +69,10 @@ pub enum Draw {
     TintedImage(String, Rect, f32, bool, Color),
     /// Installed icon and its backdrop, composited before opacity and edge fading.
     AppImage(Arc<crate::app_artwork::Artwork>, Rect, f32, Color),
+    /// A camera frame: filling the rect (cropped) or, when `contain`, fitted inside it.
+    Camera(Arc<crate::cameras::Frame>, Rect, f32, bool, Color),
     Clip(Option<Rect>),
     EdgeFade(Option<[f32; 4]>),
-    /// Horizontal counterpart: [left fade-in start, end, right fade-out start, end].
-    EdgeFadeX(Option<[f32; 4]>),
 }
 
 struct Texture {
@@ -206,8 +206,8 @@ enum BatchKind {
 struct Batch {
     kind: BatchKind,
     clip: Option<Rect>,
-    // [top fade-in, top end, bottom start, bottom fade-out, left ×2, right ×2]; 0 = off.
-    fade: Option<[f32; 8]>,
+    // [top fade-in, top end, bottom start, bottom fade-out]; 0 = off.
+    fade: Option<[f32; 4]>,
 }
 
 fn full_screen(rect: &Rect) -> bool {
@@ -293,12 +293,12 @@ fn profile_skip(command: &Draw) -> bool {
             "wallpaper"
         }
         Draw::Image(..) | Draw::TintedImage(..) => "image",
-        Draw::AppImage(..) => "app",
+        Draw::AppImage(..) | Draw::Camera(..) => "app",
         Draw::Shape(..) => "shape",
         Draw::RoundedGradient(..) => "gradient",
         Draw::Shadow(..) => "shadow",
         Draw::Text(..) => "text",
-        Draw::Clip(_) | Draw::EdgeFade(_) | Draw::EdgeFadeX(_) => return false,
+        Draw::Clip(_) | Draw::EdgeFade(_) => return false,
     };
     skip.iter().any(|entry| entry == kind || entry == "all")
 }
@@ -325,6 +325,8 @@ fn snap_rect(rect: Rect, scale: f32) -> Rect {
 }
 
 pub struct Renderer {
+    /// Clear to transparent, so the TV's video plane shows where nothing is drawn.
+    pub see_through: bool,
     program: GLuint,
     vector_program: GLuint,
     text_program: GLuint,
@@ -338,25 +340,21 @@ pub struct Renderer {
     glyphs: HashMap<(char, u16), Glyph>,
     text_runs: HashMap<TextKey, TextRun>,
     textures: HashMap<String, Option<Texture>>,
+    /// One texture per camera, replaced in place whenever a newer frame arrives.
+    camera_textures: HashMap<String, (u64, Texture)>,
     vectors: HashMap<String, Option<vector::Mesh>>,
     artwork_variants: HashMap<String, String>,
     vertices: Vec<f32>,
     batches: Vec<Batch>,
     clip: Option<Rect>,
-    // [top fade-in, top end, bottom start, bottom fade-out, left ×2, right ×2]; 0 = off.
-    fade: Option<[f32; 8]>,
+    // [top fade-in, top end, bottom start, bottom fade-out]; 0 = off.
+    fade: Option<[f32; 4]>,
     frame: u64,
     stats: RenderStats,
     pub info: GraphicsInfo,
 }
 
 impl Renderer {
-    fn set_fade(&mut self, offset: usize, fade: Option<[f32; 4]>) {
-        let mut next = self.fade.unwrap_or([0.; 8]);
-        next[offset..offset + 4].copy_from_slice(&fade.unwrap_or([0.; 4]));
-        self.fade = (next != [0.; 8]).then_some(next);
-    }
-
     pub fn new(font: &Path, gles: bool, text_embolden: f32) -> Result<Self, String> {
         let directory = font.parent().ok_or("Invalid font path")?;
         let mut fonts = HashMap::new();
@@ -446,6 +444,7 @@ impl Renderer {
         }
         let white = texture(1, 1, &[255; 4]);
         Ok(Self {
+            see_through: false,
             program,
             vector_program,
             text_program,
@@ -459,6 +458,7 @@ impl Renderer {
             glyphs: HashMap::new(),
             text_runs: HashMap::new(),
             textures: HashMap::new(),
+            camera_textures: HashMap::new(),
             vectors: HashMap::new(),
             artwork_variants: HashMap::new(),
             vertices: Vec::with_capacity(65536),
@@ -491,7 +491,7 @@ impl Renderer {
                 true
             }
             Err(error) => {
-                eprintln!("{error}");
+                crate::telemetry::log_warn!("fonts", "{error}");
                 self.failed_fonts.insert(id);
                 false
             }
@@ -901,7 +901,7 @@ impl Renderer {
                     }
                 }
                 Err(error) => {
-                    eprintln!("Luma glyph {c:?}: {error}");
+                    crate::telemetry::log_warn!("fonts", "glyph {c:?}: {error}");
                     failures += 1;
                 }
             }
@@ -912,7 +912,7 @@ impl Renderer {
             match vector::Mesh::upload(1., 1., &vertices) {
                 Ok(mesh) => Some(mesh),
                 Err(error) => {
-                    eprintln!("Luma text: {error}");
+                    crate::telemetry::log_warn!("fonts", "text: {error}");
                     failures += 1;
                     None
                 }
@@ -1002,7 +1002,7 @@ impl Renderer {
                     Some(texture(image.width(), image.height(), image.as_raw()))
                 }
                 Err(error) => {
-                    eprintln!("Artwork {path}: {error}");
+                    crate::telemetry::log_warn!("artwork", "{path}: {error}");
                     None
                 }
             });
@@ -1046,7 +1046,7 @@ impl Renderer {
             match vector::Mesh::load(Path::new(path)) {
                 Ok(mesh) => Some(mesh),
                 Err(error) => {
-                    eprintln!("{error}");
+                    crate::telemetry::log_warn!("artwork", "{error}");
                     None
                 }
             }
@@ -1272,11 +1272,88 @@ impl Renderer {
                 Draw::AppImage(image, rect, radius, tint) => {
                     self.app_image(image, *rect, *radius, *tint)
                 }
+                Draw::Camera(frame, rect, radius, contain, tint) => {
+                    self.camera_image(frame, *rect, *radius, *contain, *tint)
+                }
                 Draw::Clip(clip) => self.clip = *clip,
-                Draw::EdgeFade(fade) => self.set_fade(0, *fade),
-                Draw::EdgeFadeX(fade) => self.set_fade(4, *fade),
+                Draw::EdgeFade(fade) => self.fade = *fade,
             }
         }
+        // A full scene shows every camera on screen: free the textures of the others.
+        if area.is_none() {
+            let frame = self.frame;
+            self.camera_textures
+                .retain(|_, (_, texture)| texture.frame == frame);
+        }
+    }
+
+    fn camera_image(
+        &mut self,
+        frame: &crate::cameras::Frame,
+        mut rect: Rect,
+        radius: f32,
+        contain: bool,
+        tint: Color,
+    ) {
+        let (width, height) = frame.pixels.dimensions();
+        if width == 0 || height == 0 || rect.w <= 0. || rect.h <= 0. {
+            return;
+        }
+        let entry = self
+            .camera_textures
+            .entry(frame.key.clone())
+            .or_insert_with(|| (0, texture(width, height, &[])));
+        if entry.0 != frame.serial {
+            let started = Instant::now();
+            let texture = &mut entry.1;
+            unsafe {
+                gl::BindTexture(gl::TEXTURE_2D, texture.id);
+                if texture.width == width && texture.height == height {
+                    gl::TexSubImage2D(
+                        gl::TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        width as i32,
+                        height as i32,
+                        gl::RGBA,
+                        gl::UNSIGNED_BYTE,
+                        frame.pixels.as_raw().as_ptr().cast(),
+                    );
+                } else {
+                    *texture = self::texture(width, height, frame.pixels.as_raw());
+                }
+            }
+            entry.0 = frame.serial;
+            self.stats.image_load_ms += started.elapsed().as_secs_f64() * 1000.;
+        }
+        let texture = &mut entry.1;
+        texture.frame = self.frame;
+        let id = texture.id;
+        let (w, h) = (width as f32, height as f32);
+        let uv = if contain {
+            let scale = (rect.w / w).min(rect.h / h);
+            rect = Rect::new(
+                rect.x + (rect.w - w * scale) / 2.,
+                rect.y + (rect.h - h * scale) / 2.,
+                w * scale,
+                h * scale,
+            );
+            [0., 0., 1., 1.]
+        } else {
+            // Cover: crop the frame's longer side to the rect's shape.
+            let (sx, sy) = (
+                (rect.w / w) / (rect.w / w).max(rect.h / h),
+                (rect.h / h) / (rect.w / w).max(rect.h / h),
+            );
+            [
+                (1. - sx) / 2.,
+                (1. - sy) / 2.,
+                (1. + sx) / 2.,
+                (1. + sy) / 2.,
+            ]
+        };
+        self.quad(rect, uv, plain_radius(radius), 0., tint, id);
     }
 
     /// Draws the scene. With `damage` (drawable pixels from `damage_pixels`), only those pixels
@@ -1308,7 +1385,11 @@ impl Renderer {
         unsafe {
             gl::Viewport(0, 0, width as i32, height as i32);
             scissor(damage);
-            gl::ClearColor(0.04, 0.04, 0.05, 1.);
+            if self.see_through {
+                gl::ClearColor(0., 0., 0., 0.);
+            } else {
+                gl::ClearColor(0.04, 0.04, 0.05, 1.);
+            }
             gl::Clear(gl::COLOR_BUFFER_BIT);
             gl::Viewport(vx, vy, vw, vh);
             if self.vao != 0 {
@@ -1338,7 +1419,7 @@ impl Renderer {
                 if current_fade != Some(batch.fade) {
                     // The same cheap alpha mask applies to shapes, textures,
                     // icons and text; the unmasked wallpaper remains beneath.
-                    let fade = batch.fade.unwrap_or([0.; 8]);
+                    let fade = batch.fade.unwrap_or([0.; 4]);
                     for program in [self.program, self.vector_program, self.text_program] {
                         gl::UseProgram(program);
                         gl::Uniform4f(
@@ -1347,13 +1428,6 @@ impl Renderer {
                             fade[1],
                             fade[2],
                             fade[3],
-                        );
-                        gl::Uniform4f(
-                            gl::GetUniformLocation(program, c"u_edge_fade_x".as_ptr()),
-                            fade[4],
-                            fade[5],
-                            fade[6],
-                            fade[7],
                         );
                     }
                     current_fade = Some(batch.fade);
@@ -1736,8 +1810,9 @@ fn load_font(directory: &Path, id: u16) -> Result<Font, String> {
         .map_err(|e| format!("Font {}: {e}. Regenerate native assets.", path.display()))?;
     let font = Font::from_bytes(bytes).map_err(|e| format!("Font {}: {e}", path.display()))?;
     if cfg!(feature = "webos") {
-        eprintln!(
-            "Luma font: {name} loaded in {} ms",
+        crate::telemetry::log_info!(
+            "fonts",
+            "{name} loaded in {} ms",
             started.elapsed().as_millis()
         );
     }

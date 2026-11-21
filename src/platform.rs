@@ -6,7 +6,15 @@ use crate::{
     model::{App, Console, Input, Inventory, demo_inventory, valid_app_id},
 };
 use serde_json::{Value, json};
-use std::{collections::HashSet, sync::mpsc, thread};
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    thread,
+};
 
 #[path = "platform-install.rs"]
 mod installation;
@@ -148,16 +156,75 @@ pub fn install_dir() -> Result<std::path::PathBuf, String> {
         .clone()
 }
 
-pub fn redirect_to_home() -> Result<bool, String> {
-    // The root-only integration mounts this marker with its native Home
-    // manifest, or writes it to /var/run on webOS 5/6, where it mounts this
-    // executable over LG's (a tile's jail sees /usr/bin without that mount).
-    // A normal tile launch then opens that same instance instead of starting
-    // a second renderer writing the same preferences.
+/// Whether the root Home integration currently has Luma in place of LG's Home. The integration
+/// mounts this marker with its native Home manifest, or writes it to /var/run on webOS 5/6, where
+/// it mounts this executable over LG's (a tile's jail sees /usr/bin without that mount).
+fn home_takeover_active() -> bool {
     let marked = |file| std::fs::read_to_string(file).is_ok_and(|marker| marker.trim() == APP_ID);
-    if marked("/usr/palm/applications/com.webos.app.home/.luma-home")
-        || marked("/var/run/luma-home")
-    {
+    marked("/usr/palm/applications/com.webos.app.home/.luma-home") || marked("/var/run/luma-home")
+}
+
+/// Written by `home.sh suspend` while the LG Home tile has lifted the takeover. /var/run is shared
+/// with a tile's jail and cleared at boot, when the boot hook applies the takeover anyway.
+const HOME_SUSPENDED: &str = "/var/run/luma-home-suspended";
+
+/// Run the installed `home.sh` with `command` as root, in its own systemd unit: the command may
+/// end this process, and Homebrew Channel's exec would end it when the call returns.
+fn home_script(command: &str) -> Result<(), String> {
+    let script = install_dir()?.join("home.sh");
+    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+    let command = format!(
+        "systemd-run --unit=luma-home-{command} --collect /bin/sh {} {command}",
+        quote(&script.to_string_lossy())
+    );
+    let envelope = call(
+        "luna://org.webosbrew.hbchannel.service/exec",
+        json!({"command": command}),
+    )?;
+    for key in ["returnCode", "exitCode"] {
+        if let Some(code) = envelope.get(key)
+            && code != 0
+            && code != "0"
+        {
+            let stderr = envelope.get("stderrString").and_then(Value::as_str);
+            return Err(format!(
+                "home.sh {command} could not be started: {}",
+                output_excerpt(stderr.unwrap_or(""))
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The normal instance started while the LG Home tile had lifted the takeover: `home.sh resume`
+/// closes it and applies the takeover again, opening Luma as Home.
+fn reclaim_home() -> Result<(), String> {
+    let suspended = std::fs::read_to_string(HOME_SUSPENDED).is_ok_and(|m| m.trim() == APP_ID);
+    if !suspended || home_takeover_active() || runs_as_lg_home() {
+        return Ok(());
+    }
+    home_script("resume")
+}
+
+/// Open LG's original Home. While Luma has replaced Home, `home.sh suspend` lifts the takeover
+/// (keeping it enabled, so the boot hook reapplies it at the next cold boot), stops this Home
+/// instance and opens LG's. It runs in its own systemd unit: it ends this process, and Homebrew
+/// Channel's exec would end it when the call returns.
+fn open_lg_home() -> Result<(), String> {
+    if !home_takeover_active() && !runs_as_lg_home() {
+        return call(
+            "luna://com.webos.applicationManager/launch",
+            json!({"id": HOME_ID}),
+        )
+        .map(|_| ());
+    }
+    home_script("suspend")
+}
+
+pub fn redirect_to_home() -> Result<bool, String> {
+    // A normal tile launch opens the Home instance instead of starting
+    // a second renderer writing the same preferences.
+    if home_takeover_active() {
         thread::spawn(|| {
             call(
                 "luna://com.webos.applicationManager/launch",
@@ -175,7 +242,20 @@ pub fn redirect_to_home() -> Result<bool, String> {
 pub enum Request {
     Refresh,
     RefreshInputs,
+    /// The foreground app and HDMI inputs, for `signal_watch`.
+    WatchSignal,
+    /// Bring Home to the front.
+    GoHome,
+    /// Make Luma Home again if the LG Home tile lifted the takeover until the next boot.
+    ReclaimHome,
     Launch(String),
+    /// Open a streaming title: `deeplink::resolve` builds its launch parameters here, off the
+    /// SDL thread, and the app opens plainly when there are none.
+    LaunchTitle {
+        id: String,
+        service: String,
+        link: String,
+    },
     Uninstall(String),
     SyncSplash(String),
     Recent {
@@ -186,7 +266,11 @@ pub enum Request {
 pub enum Response {
     Inventory(Result<(Inventory, Option<String>), String>),
     Inputs(Result<Vec<Input>, String>),
+    Signal(Result<crate::signal_watch::Snapshot, String>),
     Launched(Result<(), String>),
+    /// A title launch was dropped because a newer launch or GoHome was asked for while it
+    /// resolved: nothing opened, and the newer request reports for itself.
+    LaunchDropped,
     Uninstalled {
         id: String,
         result: Result<(), String>,
@@ -217,7 +301,22 @@ impl Platform {
             } else {
                 crate::recents::demo()
             };
+            // Counts requests that bring an app (or Home) to the front, so a title launch still
+            // resolving off this thread can tell that a newer one was asked for and step aside.
+            let launches = Arc::new(AtomicU64::new(0));
             while let Ok(request) = requests.recv() {
+                if matches!(
+                    request,
+                    Request::Launch(_)
+                        | Request::LaunchTitle { .. }
+                        | Request::GoHome
+                        | Request::Recent {
+                            command: crate::recents::Command::Launch(_),
+                            ..
+                        }
+                ) {
+                    launches.fetch_add(1, Ordering::SeqCst);
+                }
                 let response = match request {
                     Request::Recent {
                         generation,
@@ -258,6 +357,26 @@ impl Platform {
                     } else {
                         Ok(desktop_inventory.inputs.clone())
                     }),
+                    Request::WatchSignal => Response::Signal(if webos {
+                        signal_snapshot()
+                    } else {
+                        Err("No TV inputs on the desktop".into())
+                    }),
+                    Request::GoHome => {
+                        if webos {
+                            let _ = call(
+                                "luna://com.webos.applicationManager/launch",
+                                json!({"id": home_id()}),
+                            );
+                        }
+                        continue;
+                    }
+                    Request::ReclaimHome => {
+                        if webos && let Err(error) = reclaim_home() {
+                            crate::telemetry::log_warn!("home", "{error}");
+                        }
+                        continue;
+                    }
                     Request::Uninstall(id) => {
                         // Validate again at the worker boundary, not just in the UI.
                         let result = uninstall_request(&id).and_then(|(_, _)| {
@@ -308,7 +427,10 @@ impl Platform {
                                             }
                                             Ok(false) => {}
                                             Err(read_error) => {
-                                                eprintln!("Luma uninstall inventory: {read_error}");
+                                                crate::telemetry::log_warn!(
+                                                    "inventory",
+                                                    "uninstall: {read_error}"
+                                                );
                                                 break;
                                             }
                                         }
@@ -326,7 +448,9 @@ impl Platform {
                         Response::Uninstalled { id, result }
                     }
                     Request::Launch(id) => Response::Launched(if webos {
-                        if crate::scroll_preview::is_placeholder(&id) {
+                        if id == crate::model::LG_HOME_APP {
+                            open_lg_home()
+                        } else if crate::scroll_preview::is_placeholder(&id) {
                             Err("Scroll preview cards cannot be launched".into())
                         } else if !valid_app_id(&id) {
                             Err("Invalid application identifier".into())
@@ -340,6 +464,27 @@ impl Platform {
                     } else {
                         Ok(())
                     }),
+                    // Resolving may read the title's web page (Hulu), so it runs on its own
+                    // thread: refresh, recents and GoHome keep being served meanwhile. A launch,
+                    // Recents launch or GoHome asked for while it resolves wins: the title is
+                    // then dropped rather than opened on top of it.
+                    Request::LaunchTitle { id, service, link } => {
+                        let responses = responses.clone();
+                        let launches = Arc::clone(&launches);
+                        let ticket = launches.load(Ordering::SeqCst);
+                        thread::spawn(move || {
+                            let response = if webos {
+                                launch_title(&id, &service, &link, || {
+                                    launches.load(Ordering::SeqCst) == ticket
+                                })
+                                .map_or(Response::LaunchDropped, Response::Launched)
+                            } else {
+                                Response::Launched(Ok(()))
+                            };
+                            let _ = responses.send(response);
+                        });
+                        continue;
+                    }
                     Request::SyncSplash(background) => {
                         if webos
                             && splash_enabled
@@ -347,7 +492,7 @@ impl Platform {
                         {
                             match sync_splash(&background) {
                                 Ok(()) => splash_background = Some(background),
-                                Err(error) => eprintln!("Luma splash: {error}"),
+                                Err(error) => crate::telemetry::log_warn!("splash", "{error}"),
                             }
                         }
                         continue;
@@ -494,6 +639,54 @@ fn sync_splash(background: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Opens a streaming title in `id`, or the app plainly when its link gives no parameters.
+/// Blocking: `deeplink::resolve` may read the title's web page. `still_current` is asked once
+/// that is done; when a newer launch was requested meanwhile, nothing is opened (None).
+fn launch_title(
+    id: &str,
+    service: &str,
+    link: &str,
+    still_current: impl Fn() -> bool,
+) -> Option<Result<(), String>> {
+    let resolved = crate::deeplink::resolve(service, link);
+    // Luma's Criterion player ships inside Luma's package; it is installed, or updated to
+    // this release, the first time this run of Luma opens a film. A failure is logged and the
+    // launch tried anyway: an earlier release's player still plays.
+    static PLAYER_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if id == crate::criterion::PLAYER && !PLAYER_READY.load(Ordering::Acquire) {
+        match overlay_helper("install-criterion", None) {
+            Ok(_) => PLAYER_READY.store(true, Ordering::Release),
+            Err(error) => {
+                crate::telemetry::log_error!("criterion", "Installing the player: {error}")
+            }
+        }
+    }
+    if !still_current() {
+        crate::telemetry::log_info!("launch", "Dropped {id}: a newer launch was requested");
+        return None;
+    }
+    Some(match resolved {
+        Some(mut launch) if id == crate::criterion::PLAYER => {
+            // A one-time code (never the account itself) for signing in on the Channel's page.
+            match crate::criterion_account::issue(std::time::Instant::now()) {
+                Ok(code) => {
+                    launch.params["code"] = json!(code);
+                    launch.params["port"] = json!(crate::home_assistant::PORT);
+                }
+                Err(error) => crate::telemetry::log_warn!("criterion", "no sign-in code: {error}"),
+            }
+            launch_with_params(id, &launch.params)
+        }
+        Some(launch) => launch_with_params(id, &launch.params),
+        None if valid_app_id(id) => call(
+            "luna://com.webos.applicationManager/launch",
+            json!({"id": id}),
+        )
+        .map(|_| ()),
+        None => Err("Invalid application identifier".into()),
+    })
+}
+
 /// Launches (or relaunches, for an app that is already open) `id` with launch parameters.
 pub fn launch_with_params(id: &str, params: &Value) -> Result<(), String> {
     if !valid_app_id(id) {
@@ -559,7 +752,7 @@ pub fn toast(message: &str) -> Result<(), String> {
 /// reliable cross-version removability flag.
 pub fn can_uninstall(id: &str) -> bool {
     valid_app_id(id)
-        && !id.starts_with(crate::model::CUSTOM_TILE_PREFIX)
+        && !crate::model::is_builtin(id)
         && !crate::scroll_preview::is_placeholder(id)
         && !["com.webos.", "com.palm.", "com.lge."]
             .iter()
@@ -625,7 +818,7 @@ fn call(uri: &str, payload: Value) -> Result<Value, String> {
         .and_then(checked_response)
         .map_err(|error| {
             let error = format!("{uri}: {error}");
-            eprintln!("Luma TV service: {error}");
+            crate::telemetry::log_warn!("tv-service", "{error}");
             error
         })
 }
@@ -644,14 +837,23 @@ fn checked_response(value: Value) -> Result<Value, String> {
 }
 
 fn inventory_read(uri: &str, field: &str) -> Result<Value, String> {
+    service_read(uri, field)?
+        .get(field)
+        .cloned()
+        .ok_or_else(|| format!("{uri}: Missing TV inventory field: {field}"))
+}
+
+/// The reply to a sam/EIM/tvpower read that Luma's own role may not be allowed to make. A
+/// direct reply without `field` falls back to the elevated read.
+fn service_read(uri: &str, field: &str) -> Result<Value, String> {
     // In place of LG's Home, Luma holds LG Home's LS2 role and asks sam/EIM itself: an early
     // root integration can bring this Home up long before Homebrew's service starts (~21 s vs
     // ~51 s into a cold boot). A refused call answers at once and falls back below.
     if runs_as_lg_home()
         && let Ok(response) = call(uri, json!({}))
-        && let Some(value) = response.get(field)
+        && response.get(field).is_some()
     {
-        return Ok(value.clone());
+        return Ok(response);
     }
     // Fixed inventory commands use Homebrew's elevated service.
     // Use the same one-reply invocation as the web launcher, without guessing
@@ -663,9 +865,9 @@ fn inventory_read(uri: &str, field: &str) -> Result<Value, String> {
         "luna://org.webosbrew.hbchannel.service/exec",
         json!({"command": command}),
     )?;
-    inventory_payload(&envelope, field).map_err(|error| {
+    command_reply(&envelope).map_err(|error| {
         let error = format!("{uri}: {error}");
-        eprintln!("Luma TV inventory: {error}");
+        crate::telemetry::log_warn!("inventory", "{error}");
         error
     })
 }
@@ -799,28 +1001,62 @@ fn recent_call(command: &crate::recents::Command) -> Result<Value, String> {
 }
 
 fn inventory() -> Result<(Inventory, Option<String>), String> {
-    let apps = normalize_apps(&inventory_read(
-        "luna://com.webos.applicationManager/listApps",
-        "apps",
-    )?)?;
+    let raw = inventory_read("luna://com.webos.applicationManager/listApps", "apps")?;
+    let apps = normalize_apps(&raw)?;
+    let search = lg_search_app(&raw);
     let inputs = input_inventory();
     match inputs {
         Ok(inputs) => {
-            eprintln!(
-                "Luma TV inventory: {} apps, {} inputs",
+            crate::telemetry::log_info!(
+                "inventory",
+                "{} apps, {} inputs, LG search {}",
                 apps.len(),
-                inputs.len()
+                inputs.len(),
+                search.as_deref().unwrap_or("not found")
             );
-            Ok((Inventory { apps, inputs }, None))
+            Ok((
+                Inventory {
+                    apps,
+                    inputs,
+                    search,
+                },
+                None,
+            ))
         }
         Err(error) => Ok((
             Inventory {
                 apps,
                 inputs: vec![],
+                search,
             },
             Some(format!("Inputs could not be refreshed: {error}")),
         )),
     }
+}
+
+/// The HDMI input in front with every input's status, for `signal_watch`. Inputs are read only
+/// while an HDMI input is in front of a TV that is on, so polls during other apps (or standby,
+/// where a console follows the TV off over CEC) cost one read and never go Home.
+fn signal_snapshot() -> Result<crate::signal_watch::Snapshot, String> {
+    let foreground = service_read(
+        "luna://com.webos.applicationManager/getForegroundAppInfo",
+        "appId",
+    )?;
+    let Some(app) = foreground
+        .get("appId")
+        .and_then(Value::as_str)
+        .filter(|id| crate::signal_watch::is_input(id))
+    else {
+        return Ok((None, vec![]));
+    };
+    let power = service_read(
+        "luna://com.webos.service.tvpower/power/getPowerState",
+        "state",
+    )?;
+    if !crate::signal_watch::powered_on(&power) {
+        return Ok((None, vec![]));
+    }
+    Ok((Some(app.to_owned()), input_inventory()?))
 }
 
 fn input_inventory() -> Result<Vec<Input>, String> {
@@ -840,6 +1076,52 @@ fn title(value: Option<&str>, fallback: &str) -> String {
     } else {
         clean.trim().into()
     }
+}
+
+/// LG's own search app IDs, most specific first. The ID differs between webOS versions, so the
+/// installed app list decides.
+const LG_SEARCH_IDS: [&str; 4] = [
+    "com.webos.app.search",
+    "com.webos.app.searchapp",
+    "com.webos.app.lgsearch",
+    "com.webos.app.searchviewer",
+];
+
+/// The voice app, the last resort: older firmware runs search through it.
+const LG_VOICE_ID: &str = "com.webos.app.voice";
+
+/// LG's search app from the raw `listApps` reply, hidden system apps included. A known search ID
+/// wins, then any LG system app with "search" in its ID, then the voice app. Every search or
+/// voice app seen is logged, so the right ID for a new firmware can be read from the TV's log.
+pub fn lg_search_app(raw: &Value) -> Option<String> {
+    let ids: Vec<&str> = raw
+        .as_array()?
+        .iter()
+        .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+        .filter(|id| valid_app_id(id))
+        .collect();
+    let seen: Vec<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| id.contains("search") || id.contains("voice"))
+        .collect();
+    if !seen.is_empty() {
+        crate::telemetry::log_info!("inventory", "LG search candidates: {}", seen.join(", "));
+    }
+    LG_SEARCH_IDS
+        .iter()
+        .copied()
+        .find(|known| ids.contains(known))
+        .or_else(|| {
+            ids.iter().copied().find(|id| {
+                ["com.webos.", "com.lge.", "com.palm."]
+                    .iter()
+                    .any(|prefix| id.starts_with(prefix))
+                    && id.contains("search")
+            })
+        })
+        .or_else(|| ids.contains(&LG_VOICE_ID).then_some(LG_VOICE_ID))
+        .map(str::to_owned)
 }
 
 pub fn normalize_apps(raw: &Value) -> Result<Vec<App>, String> {
@@ -1060,5 +1342,46 @@ mod home_identity_tests {
     fn both_home_variants_are_hidden_from_application_inventory() {
         let raw = json!([{"id":HOME_ID,"title":"Home","visible":true}, {"id":FULL_HOME_ID,"title":"Home","visible":true}]);
         assert!(normalize_apps(&raw).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod lg_search_tests {
+    use super::*;
+    #[test]
+    fn known_search_app_wins_over_voice_and_stays_out_of_the_catalogue() {
+        let raw = json!([
+            {"id": "com.webos.app.voice", "title": "Voice", "visible": false},
+            {"id": "com.webos.app.searchapp", "title": "Search", "visible": false},
+            {"id": "netflix", "title": "Netflix"},
+        ]);
+        assert_eq!(
+            lg_search_app(&raw).as_deref(),
+            Some("com.webos.app.searchapp")
+        );
+        assert!(
+            normalize_apps(&raw)
+                .unwrap()
+                .iter()
+                .all(|app| app.id == "netflix")
+        );
+    }
+    #[test]
+    fn unknown_lg_search_app_wins_over_voice() {
+        let voice = json!([{"id": "com.webos.app.voice"}]);
+        assert_eq!(
+            lg_search_app(&voice).as_deref(),
+            Some("com.webos.app.voice")
+        );
+        let other = json!([
+            {"id": "com.webos.app.voice"},
+            {"id": "com.lge.app.newsearch"},
+            {"id": "com.example.search"},
+        ]);
+        assert_eq!(
+            lg_search_app(&other).as_deref(),
+            Some("com.lge.app.newsearch")
+        );
+        assert_eq!(lg_search_app(&json!([{"id": "com.example.search"}])), None);
     }
 }

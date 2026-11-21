@@ -1,7 +1,7 @@
 use crate::i18n::Language;
 use crate::model::{
-    App, BACKGROUNDS, CATEGORIES, CUSTOM_TILE_PREFIX, CustomTile, INPUT_NAME_LIMIT, InputMode,
-    Inventory, Preferences, clean_input_name,
+    App, BACKGROUNDS, CAMERAS_APP, CATEGORIES, CustomTile, INPUT_NAME_LIMIT, InputMode, Inventory,
+    Preferences, clean_input_name,
 };
 use crate::text_rendering::TextRendering;
 use crate::weather::{self, Unit};
@@ -17,14 +17,20 @@ pub const APPS_COLUMNS: usize = 6;
 /// Automatic inventory retries before the error shows: with the 6.5 s Luna timeout about 50 s.
 pub const INVENTORY_RETRIES: u32 = 5;
 pub const INVENTORY_RETRY_DELAY: Duration = Duration::from_secs(2);
-pub const HOME_STRIP_LEFT: f32 = 84.;
-// Six favourites in full and the seventh cut off and fading out at the right (Apple TV rows):
-// the strip ends after the sixth tile, so a focused tile never sits in the fade.
-pub const HOME_STRIP_RIGHT: f32 = 1748.;
+/// Home favourites fill six columns, then wrap onto further rows.
+pub const HOME_COLUMNS: usize = 6;
 pub const HOME_TILE_WIDTH: f32 = 256.;
 pub const HOME_TILE_PITCH: f32 = 281.6;
-pub const HOME_FADE_LEFT: f32 = 8.;
-pub const HOME_FADE_RIGHT: f32 = 1910.;
+/// Movie and show posters on the Search page, eight to a row under the selected title; two
+/// rows fit on screen.
+pub const TITLE_COLUMNS: usize = 8;
+/// The Search tab's index: drawn first, left of Home, but numbered after the original three
+/// tabs so Home, Apps and Settings keep their indices.
+pub const SEARCH_TAB: usize = 3;
+/// Tab indices in the order the header draws them, left to right.
+pub const TAB_ORDER: [usize; 4] = [SEARCH_TAB, 0, 1, 2];
+/// Where the Search page's poster grid starts, under the selected title.
+pub const SEARCH_GRID_TOP: f32 = 352.;
 pub const BACKGROUND_FADE: f32 = 0.4;
 pub const CYCLE_FADE: f32 = 1.6;
 
@@ -40,11 +46,15 @@ pub enum Page {
     Home,
     Apps,
     Settings,
+    /// Movies and shows: the search field in the header, the selected title, then posters.
+    Search,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Target {
     Nav(usize),
+    /// The header's search button, right of the tabs: hands off to LG's own search app.
+    LgSearch,
     TvSettings,
     InstallUpdate,
     CheckUpdates,
@@ -57,6 +67,8 @@ pub enum Target {
     ClearFilter,
     Search,
     ClearSearch,
+    /// A movie or show result on the Search page, by index into the streaming results.
+    Title(usize),
     Sidebar(usize),
     Setting(usize),
     Widget(usize),
@@ -69,6 +81,8 @@ pub enum Target {
     AppNamesApps,
     ClockFormat,
     ClockTimeFormat,
+    HomeAssistantToggle,
+    HomeAssistantCode,
     Background(usize),
     UploadWallpaper,
     WallpaperCycle,
@@ -99,6 +113,20 @@ pub enum Target {
     TileTest(String),
     TileRemove(String),
     TileEditor,
+    /// Cameras app: a camera tile, the settings button, the options sheet's actions and the
+    /// settings sheet's rows.
+    Camera(String),
+    CameraGear,
+    CameraMove,
+    CameraRename,
+    CameraNameReset,
+    CameraHide,
+    CameraSettings,
+    CameraLive,
+    CameraShown(String),
+    /// Criterion screen: a film card by row and position, and Try again when nothing loaded.
+    Film(usize, usize),
+    CriterionRetry,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -132,16 +160,40 @@ pub struct Control {
 
 #[derive(Clone, Debug)]
 pub enum Overlay {
-    Options { id: String, restore: Target },
-    Delete { id: String, restore: Target },
-    Recents { restore: Target },
+    Options {
+        id: String,
+        restore: Target,
+    },
+    Delete {
+        id: String,
+        restore: Target,
+    },
+    Recents {
+        restore: Target,
+    },
     Keyboard,
     SystemKeyboard,
     WallpaperUpload,
     TileEditor,
+    /// QR dialog for entering streaming search keys on a phone.
+    StreamingKeys,
     HomeAssistantSetup,
-    BackgroundOptions { id: String, restore: Target },
-    BackgroundDelete { id: String, restore: Target },
+    BackgroundOptions {
+        id: String,
+        restore: Target,
+    },
+    BackgroundDelete {
+        id: String,
+        restore: Target,
+    },
+    /// The full-screen Cameras gallery; Back returns focus to `restore`.
+    Cameras {
+        restore: Target,
+    },
+    /// The full-screen Criterion Channel screen; Back returns focus to `restore`.
+    Criterion {
+        restore: Target,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -161,14 +213,32 @@ pub enum Subpage {
     Temperature,
     Language,
     TextRendering,
+    HomeAssistant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum TextField {
     Apps,
+    /// The Search tab's field: movies and shows.
+    Titles,
     Location,
     Name,
     InputName,
+    CameraName,
+}
+
+impl TextField {
+    /// How Home Assistant names the field when it offers to type it on a phone.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Apps => "search",
+            Self::Location => "weather_location",
+            Self::Name => "greeting_name",
+            Self::InputName => "input_name",
+            Self::CameraName => "camera_name",
+            Self::Titles => "titles",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -187,6 +257,13 @@ pub enum Effect {
     /// Refresh apps: read the inventory and every app icon again.
     Reload,
     Launch(String),
+    /// Open a movie or show in `app` from its `link` on `service`; `deeplink::resolve` turns that
+    /// into launch parameters on the platform worker (it may read the title's web page).
+    LaunchTitle {
+        app: String,
+        service: String,
+        link: String,
+    },
     Uninstall(String),
     DeleteWallpaper(String),
     Recent {
@@ -196,6 +273,8 @@ pub enum Effect {
     /// Fire-and-forget HTTP request for a custom tile, off the SDL thread.
     FireWebhook(CustomTile),
     Quit,
+    /// Make Luma Home again if the LG Home tile lifted the takeover.
+    ReclaimHome,
     Weather(weather::Command),
     UpdateDownload(String),
 }
@@ -219,18 +298,21 @@ pub struct State {
     pub section: usize,
     pub subpage: Option<Subpage>,
     pub scroll: f32,
-    pub home_scroll: f32,
     pub overlay: Option<Overlay>,
     pub moving: Option<String>,
     pub loading: bool,
     /// Set by Refresh apps: the next inventory also reloads every app icon.
     pub reload_artwork: bool,
     pub launching: bool,
+    /// The app of the launch in flight; it moves to the front of favorites once it opens.
+    pub launch_requested: Option<String>,
     pub uninstalling: Option<String>,
     pub notice: Option<(String, Instant)>,
     pub error: Option<String>,
     pub available_update: Option<String>,
     pub update_status: crate::update::Status,
+    /// Unix seconds of the last successful update check.
+    pub update_checked: Option<u64>,
     pub update_check_requested: bool,
     /// Inventory loads that failed in a row while no apps were shown yet.
     pub inventory_failures: u32,
@@ -243,10 +325,37 @@ pub struct State {
     pub deleting_wallpaper: Option<String>,
     pub wallpaper_upload: Option<Result<crate::wallpapers::Session, String>>,
     pub tile_editor: Option<Result<crate::companion::Session, String>>,
+    pub key_editor: Option<Result<crate::companion::Session, String>>,
+    /// Which streaming search keys are stored (never the keys themselves).
+    pub streaming_keys: crate::streaming_keys::Status,
+    /// What is typed in the Search tab's field.
+    pub title_query: String,
+    /// Enter closed the Search tab's keyboard before its results were in: focus the first
+    /// result when they arrive, unless the user moved on first.
+    title_focus_pending: bool,
+    /// Movies and shows matching `title_query`, once a Movie of the Night key is stored.
+    pub titles: crate::streaming::Incremental<crate::streaming::Ranked>,
+    /// Posters for the shows in `titles`, by show ID: None while loading or when unavailable.
+    pub posters: std::collections::HashMap<String, Option<std::sync::Arc<crate::cameras::Frame>>>,
+    /// Review scores for the shows in `titles`, by IMDb ID: None while loading. Only fetched
+    /// once an MDBList key is stored.
+    pub scores: std::collections::HashMap<String, Option<crate::mdblist::Scores>>,
     /// The HACS install link's QR code, made when its dialog opens.
     pub home_assistant_qr: Option<Result<crate::companion::Session, String>>,
     /// Where Home Assistant reaches this TV, once the listener is up.
     pub home_assistant_address: Option<String>,
+    /// The code Home Assistant is waiting for; the setup dialog shows it instead of the QR code.
+    pub home_assistant_code: Option<String>,
+    /// The server that just paired, which the setup dialog confirms.
+    pub home_assistant_paired: Option<String>,
+    /// Focus to return to when the setup dialog opened by itself for a pairing code.
+    pub home_assistant_restore: Option<Target>,
+    /// Paired servers whose Luma integration is older than this TV needs.
+    pub home_assistant_outdated: Vec<String>,
+    /// The Cameras app was opened; the main loop asks the Home Assistant service.
+    pub show_cameras: bool,
+    pub cameras: crate::cameras::Gallery,
+    pub criterion: crate::criterion::Browser,
     /// Luma update (Settings → System), driven by the update worker.
     pub update: crate::update::InstallStatus,
     pub panel_started: Option<Instant>,
@@ -270,17 +379,18 @@ impl State {
             section: 0,
             subpage: None,
             scroll: 0.,
-            home_scroll: 0.,
             overlay: None,
             moving: None,
             loading: false,
             reload_artwork: false,
             launching: false,
+            launch_requested: None,
             uninstalling: None,
             notice: None,
             error: None,
             available_update: None,
             update_status: crate::update::Status::Unchecked,
+            update_checked: None,
             update_check_requested: false,
             inventory_failures: 0,
             dirty: true,
@@ -292,8 +402,22 @@ impl State {
             deleting_wallpaper: None,
             wallpaper_upload: None,
             tile_editor: None,
+            key_editor: None,
+            streaming_keys: Default::default(),
+            title_query: String::new(),
+            title_focus_pending: false,
+            titles: Default::default(),
+            posters: Default::default(),
+            scores: Default::default(),
             home_assistant_qr: None,
             home_assistant_address: None,
+            home_assistant_code: None,
+            home_assistant_paired: None,
+            home_assistant_restore: None,
+            home_assistant_outdated: Vec::new(),
+            show_cameras: false,
+            cameras: crate::cameras::Gallery::default(),
+            criterion: crate::criterion::Browser::default(),
             update: crate::update::InstallStatus::default(),
             panel_started: None,
             weather: weather::Weather::default(),
@@ -309,13 +433,52 @@ impl State {
         self.home_assistant_qr = Some(crate::companion::qr(
             crate::home_assistant::HACS_LINK.to_owned(),
         ));
+        self.home_assistant_paired = None;
+        self.home_assistant_restore = None;
         self.overlay = Some(Overlay::HomeAssistantSetup);
         self.focus = Target::CloseDialog;
         self.pressed = None;
     }
 
+    /// Home Assistant asked to pair. The setup dialog shows the code in place of its QR code,
+    /// opening by itself unless another dialog is up. False means the caller should show the
+    /// code as a notice instead.
+    pub fn home_assistant_pairing(&mut self, code: String) -> bool {
+        self.home_assistant_code = Some(code);
+        self.home_assistant_paired = None;
+        self.dirty = true;
+        match self.overlay {
+            Some(Overlay::HomeAssistantSetup) => true,
+            None if self.moving.is_none() => {
+                let restore = self.focus.clone();
+                self.open_home_assistant_setup();
+                self.home_assistant_restore = Some(restore);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The pairing code expired or was refused; the dialog shows its QR code again.
+    pub fn home_assistant_pairing_ended(&mut self) {
+        self.home_assistant_code = None;
+        self.dirty = true;
+    }
+
+    /// A server paired. An open setup dialog says so (true); otherwise the caller shows a notice.
+    pub fn home_assistant_paired_with(&mut self, name: String) -> bool {
+        self.home_assistant_code = None;
+        self.dirty = true;
+        if matches!(self.overlay, Some(Overlay::HomeAssistantSetup)) {
+            self.home_assistant_paired = Some(name);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn notify(&mut self, text: impl Into<String>) {
-        self.notice = Some((text.into(), Instant::now()));
+        self.notice = Some((text.into(), crate::clock::now()));
         self.dirty = true;
     }
 
@@ -325,12 +488,13 @@ impl State {
                 let announce = latest.is_some() && latest != self.available_update;
                 self.available_update = latest;
                 self.update_status = crate::update::Status::Checked;
+                self.update_checked = Some(unix_now());
                 if announce {
                     self.notify(self.preferences.language.t("updateAvailable"));
                 }
             }
             Err(error) => {
-                eprintln!("Luma update check: {error}");
+                crate::telemetry::log_warn!("update", "check: {error}");
                 self.update_status = crate::update::Status::Failed;
             }
         }
@@ -375,7 +539,7 @@ impl State {
                         self.update_status = crate::update::Status::Unchecked;
                     }
                     Err(error) => {
-                        eprintln!("Luma update: {error}");
+                        crate::telemetry::log_warn!("update", "{error}");
                         self.update = InstallStatus::Failed(error);
                         self.update_status = crate::update::Status::Failed;
                         self.notify(self.preferences.language.t("updateError"));
@@ -397,13 +561,14 @@ impl State {
                 recents_open,
                 self.preferences.reduced_motion,
                 self.pointer,
-                Instant::now(),
+                crate::clock::now(),
             );
         }
         if let Some(start) = self.panel_started {
             self.dirty = true;
             let duration = if self.overlay.is_some() { 120 } else { 150 };
-            if self.preferences.reduced_motion || start.elapsed() >= Duration::from_millis(duration)
+            if self.preferences.reduced_motion
+                || crate::clock::since(start) >= Duration::from_millis(duration)
             {
                 self.panel_started = None;
             }
@@ -411,7 +576,7 @@ impl State {
         if self
             .notice
             .as_ref()
-            .is_some_and(|(_, start)| start.elapsed() < Duration::from_millis(120))
+            .is_some_and(|(_, start)| crate::clock::since(*start) < Duration::from_millis(120))
             && !self.preferences.reduced_motion
         {
             self.dirty = true;
@@ -419,7 +584,7 @@ impl State {
         if let Some((_, start)) = &self.previous_background {
             self.dirty = true;
             if self.preferences.reduced_motion
-                || start.elapsed().as_secs_f32() >= self.background_fade
+                || crate::clock::since(*start).as_secs_f32() >= self.background_fade
             {
                 self.previous_background = None;
             }
@@ -427,7 +592,7 @@ impl State {
         if self
             .notice
             .as_ref()
-            .is_some_and(|(_, start)| start.elapsed() > Duration::from_secs(5))
+            .is_some_and(|(_, start)| crate::clock::since(*start) > Duration::from_secs(5))
         {
             self.notice = None;
             self.dirty = true;
@@ -439,6 +604,7 @@ impl State {
             Page::Home => 0,
             Page::Apps => 1,
             Page::Settings => 2,
+            Page::Search => SEARCH_TAB,
         }
     }
 
@@ -449,16 +615,29 @@ impl State {
             || self.previous_background.is_some()
             || self.panel_started.is_some()
             || (!self.preferences.reduced_motion
-                && self
-                    .notice
-                    .as_ref()
-                    .is_some_and(|(_, start)| start.elapsed() < Duration::from_millis(120)))
+                && self.notice.as_ref().is_some_and(|(_, start)| {
+                    crate::clock::since(*start) < Duration::from_millis(120)
+                }))
     }
 
     /// Home's lifecycle relaunch returns directly to Home, even from an overlay.
     pub fn return_home(&mut self) -> Vec<Effect> {
         // Commit keyboard drafts before open() clears their settings subpage.
         let pending = self.finish_text_input();
+        if self.cameras_open() {
+            self.close_cameras();
+        }
+        // Back out of a film the Criterion screen opened also relaunches Home: stay on its grid.
+        // The Home key, pressed with Luma already in front, still closes it.
+        if self.criterion_open() && std::mem::take(&mut self.criterion.playing) {
+            self.pointer = false;
+            self.pressed = None;
+            self.dirty = true;
+            return pending;
+        }
+        if self.criterion_open() {
+            self.close_criterion();
+        }
         self.recents.pending = None;
         self.recents.visibility = 0.;
         self.recents.closing_focus = None;
@@ -474,13 +653,11 @@ impl State {
         self.page = match index {
             1 => Page::Apps,
             2 => Page::Settings,
+            SEARCH_TAB => Page::Search,
             _ => Page::Home,
         };
         self.focus = Target::Nav(self.page_index());
         self.scroll = 0.;
-        if self.page == Page::Home {
-            self.scroll_favorites(0.);
-        }
         self.query.clear();
         self.filter = 0;
         self.overlay = None;
@@ -488,6 +665,11 @@ impl State {
         self.subpage = None;
         self.panel_started = None;
         self.dirty = true;
+        if self.page == Page::Search {
+            // The field starts empty, as the TV keyboard does, and the keyboard comes up.
+            self.title_query.clear();
+            self.open_keyboard(TextField::Titles);
+        }
     }
 
     pub fn apps(&self) -> Vec<&App> {
@@ -505,6 +687,23 @@ impl State {
                 .collect();
         }
         let query = self.query.to_lowercase();
+        // "Apps only" inputs lead the All tab (and search) while they are live, in port order.
+        let inputs: Vec<_> = self
+            .input_apps
+            .iter()
+            .filter(|app| {
+                self.filter == 0
+                    && self.inventory.inputs.iter().any(|input| {
+                        input.id == app.id
+                            && self.preferences.input_in_apps(input)
+                            // Search finds the card by its title or its port ("HDMI 2").
+                            && (input.port.to_lowercase().contains(&query)
+                                || self.input_app(&app.id).is_some_and(|face| {
+                                    face.title.to_lowercase().contains(&query)
+                                }))
+                    })
+            })
+            .collect();
         let mut apps: Vec<_> = self
             .inventory
             .apps
@@ -527,7 +726,7 @@ impl State {
                 .cmp(&rank(b))
                 .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
         });
-        apps
+        inputs.into_iter().chain(apps).collect()
     }
 
     /// A visible HDMI input by its app ID.
@@ -602,19 +801,19 @@ impl State {
             }
     }
 
-    pub fn favorites_viewport(&self) -> Rect {
-        let content = self.content_viewport();
-        let left = if self.home_scroll > 0. {
-            HOME_FADE_LEFT
-        } else {
-            0.
-        };
-        Rect::new(left, content.y, HOME_FADE_RIGHT - left, content.h)
-    }
-
     pub fn apps_viewport(&self) -> Rect {
         let content = self.content_viewport();
         Rect::new(content.x, 244.8, content.w, content.y + content.h - 244.8)
+    }
+
+    /// The Search page's poster grid, which scrolls under the selected title.
+    pub fn search_viewport(&self) -> Rect {
+        Rect::new(
+            64.,
+            SEARCH_GRID_TOP - 16.,
+            1792.,
+            1080. - SEARCH_GRID_TOP + 16.,
+        )
     }
 
     pub fn backgrounds_viewport(&self) -> Rect {
@@ -627,27 +826,27 @@ impl State {
             .iter()
             .rev()
             .find(|control| {
-                let viewport =
-                    if self.page == Page::Home && matches!(control.target, Target::App(_)) {
-                        self.favorites_viewport()
-                    } else if matches!(control.target, Target::Background(_)) {
-                        self.backgrounds_viewport()
-                    } else if self.page == Page::Apps {
-                        self.apps_viewport()
-                    } else {
-                        self.content_viewport()
-                    };
+                let viewport = if matches!(control.target, Target::Background(_)) {
+                    self.backgrounds_viewport()
+                } else if self.page == Page::Apps {
+                    self.apps_viewport()
+                } else if self.page == Page::Search {
+                    self.search_viewport()
+                } else {
+                    self.content_viewport()
+                };
                 control.rect.contains(x, y) && (!control.scrollable || viewport.contains(x, y))
             })
             .map(|control| control.target.clone())
     }
 
-    /// Returns whether this wheel event scrolled favorites, so a pending card press is cancelled.
+    /// Returns whether this wheel event scrolled the Home favourites, so a pending card press
+    /// is cancelled rather than released on a different card.
     pub fn wheel_scroll(
         &mut self,
         controls: &[Control],
         position: Option<(f32, f32)>,
-        x: i32,
+        _x: i32,
         y: i32,
     ) -> bool {
         let backgrounds =
@@ -656,58 +855,91 @@ impl State {
         {
             return false;
         }
-        let over_favorites = self.page == Page::Home
-            && position.is_some_and(|(x, y)| {
-                self.favorites_viewport().contains(x, y)
-                    && controls.iter().any(|control| {
-                        matches!(control.target, Target::App(_)) && control.rect.contains(x, y)
-                    })
-            });
-        let favorites = self.page == Page::Home && (x != 0 || over_favorites);
-        if favorites {
-            self.scroll_favorites((if x != 0 { x } else { -y }) as f32 * HOME_TILE_PITCH);
-        } else {
-            let bottom = self.scroll_bottom();
-            let max = controls
-                .iter()
-                .filter(|c| {
-                    c.scrollable && (!backgrounds || matches!(c.target, Target::Background(_)))
-                })
-                .map(|c| c.rect.y + c.rect.h + self.scroll - bottom)
-                .fold(0., f32::max);
-            self.scroll = (self.scroll - y as f32 * 90.).clamp(0., max.max(0.));
-        }
+        let previous = self.scroll;
+        let bottom = self.scroll_bottom();
+        let max = controls
+            .iter()
+            .filter(|c| c.scrollable && (!backgrounds || matches!(c.target, Target::Background(_))))
+            .map(|c| c.rect.y + c.rect.h + self.scroll - bottom)
+            .fold(0., f32::max);
+        self.scroll = (self.scroll - y as f32 * 90.).clamp(0., max.max(0.));
         self.pointer = true;
         self.dirty = true;
-        favorites
+        self.page == Page::Home && self.scroll != previous
     }
 
-    pub fn scroll_favorites(&mut self, delta: f32) {
-        let count = self
-            .preferences
-            .favorites(&self.inventory.apps)
-            .iter()
-            .filter(|id| {
-                !self.preferences.hidden.contains(id)
-                    && self.inventory.apps.iter().any(|app| &app.id == *id)
-            })
-            .count();
-        let content = if count == 0 {
-            0.
-        } else {
-            (count - 1) as f32 * HOME_TILE_PITCH + HOME_TILE_WIDTH
-        };
-        let max = (content - (HOME_STRIP_RIGHT - HOME_STRIP_LEFT)).max(0.);
-        let next = (self.home_scroll + delta).clamp(0., max);
-        if next != self.home_scroll {
-            self.home_scroll = next;
-            self.dirty = true;
+    /// Moves a launched favourite to the front, so Home lists the most recently used first.
+    /// Returns whether the saved order changed.
+    pub fn mark_used(&mut self, id: &str) -> bool {
+        let mut ids = self.preferences.favorites(&self.inventory.apps);
+        match ids.iter().position(|item| item == id) {
+            Some(index) if index > 0 => {
+                let id = ids.remove(index);
+                ids.insert(0, id);
+                self.preferences.favorites = Some(ids);
+                self.dirty = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The result of a launch request. Only an app that opened moves to the front of
+    /// favorites, so a failed launch leaves the saved order as it was.
+    /// A title launch was dropped for a newer one: stop showing it as opening, and don't count
+    /// its app as used.
+    pub fn launch_dropped(&mut self) {
+        self.launching = false;
+        self.launch_requested = None;
+        self.notice = None;
+        self.dirty = true;
+    }
+
+    pub fn launch_response(&mut self, result: Result<(), String>) -> Vec<Effect> {
+        self.launching = false;
+        let id = self.launch_requested.take();
+        match result {
+            Err(error) => {
+                crate::telemetry::log_warn!("apps", "launch: {error}");
+                self.notify(self.preferences.language.t("appOpenError"));
+                vec![]
+            }
+            Ok(()) => {
+                self.notice = None;
+                self.dirty = true;
+                if id.is_some_and(|id| self.mark_used(&id)) {
+                    vec![Effect::Save]
+                } else {
+                    vec![]
+                }
+            }
         }
     }
 
     /// Returns whether a newly reported console changed the saved preferences.
     pub fn set_inventory(&mut self, next: Inventory, warning: Option<String>) -> bool {
+        // Built-in tiles are merged in below and never come from the TV, so compare only the
+        // TV's apps: otherwise every refresh would look like a change.
+        let apps_changed = !self
+            .inventory
+            .apps
+            .iter()
+            .filter(|app| !crate::model::is_builtin(&app.id))
+            .map(|app| &app.id)
+            .eq(next
+                .apps
+                .iter()
+                .filter(|app| !crate::model::is_builtin(&app.id))
+                .map(|app| &app.id));
         self.inventory.apps = next.apps;
+        if apps_changed {
+            // Remembered movie and show results chose among the old apps.
+            self.titles.refresh(Instant::now());
+        }
+        self.inventory.search = next.search;
+        if self.focus == Target::LgSearch && self.inventory.search.is_none() {
+            self.focus = Target::Nav(self.page_index());
+        }
         self.sync_custom_tiles();
         let mut remembered = false;
         if let Some(warning) = warning {
@@ -769,7 +1001,7 @@ impl State {
             .inventory
             .apps
             .iter()
-            .all(|app| app.id.starts_with(CUSTOM_TILE_PREFIX));
+            .all(|app| crate::model::is_builtin(&app.id));
         if no_tv_apps && self.inventory_failures < INVENTORY_RETRIES {
             self.inventory_failures += 1;
             return Some(INVENTORY_RETRY_DELAY);
@@ -780,21 +1012,45 @@ impl State {
         None
     }
 
-    /// Custom webhook tiles are never read from the TV. They are merged into
-    /// the inventory on every refresh and edit, so favoriting, hiding and
-    /// search treat them like any other app.
+    /// Custom webhook tiles and the Cameras app are never read from the TV. They are merged
+    /// into the inventory on every refresh and edit, so favoriting, hiding and search treat
+    /// them like any other app. Cameras is listed only while Home Assistant is on.
     pub fn sync_custom_tiles(&mut self) {
         self.inventory
             .apps
-            .retain(|app| !app.id.starts_with(CUSTOM_TILE_PREFIX));
+            .retain(|app| !crate::model::is_builtin(&app.id));
         self.inventory.apps.extend(self.preferences.custom_apps());
+        if self.preferences.home_assistant {
+            self.inventory.apps.push(App {
+                id: CAMERAS_APP.into(),
+                title: self.preferences.language.t("cameras").into(),
+                // The shortcut tiles' surface; `mark` draws the camera icon.
+                brand: "custom".into(),
+                category: "Utilities".into(),
+                icon: None,
+                mark: "camera",
+            });
+        }
+        self.inventory.apps.push(App {
+            id: crate::criterion::APP.into(),
+            title: "Criterion Channel".into(),
+            brand: "custom".into(),
+            category: "Streaming".into(),
+            icon: None,
+            mark: "popcorn",
+        });
+        self.inventory.apps.push(App {
+            id: crate::model::LG_HOME_APP.into(),
+            title: "LG Home".into(),
+            brand: "custom".into(),
+            category: "Utilities".into(),
+            icon: None,
+            mark: "tv",
+        });
         self.dirty = true;
     }
 
     pub fn reconcile_focus(&mut self) {
-        if self.page == Page::Home {
-            self.scroll_favorites(0.);
-        }
         if let Target::App(id) = &self.focus
             && !self.apps().iter().any(|app| &app.id == id)
         {
@@ -806,7 +1062,7 @@ impl State {
         match self.page {
             Page::Home => self
                 .apps()
-                .get(((self.home_scroll - 0.01).max(0.) / HOME_TILE_PITCH).ceil() as usize)
+                .first()
                 .map(|app| Target::App(app.id.clone()))
                 .unwrap_or(if self.error.is_some() {
                     Target::Retry
@@ -819,6 +1075,13 @@ impl State {
                 .map(|app| Target::App(app.id.clone()))
                 .unwrap_or(Target::Filter(1)),
             Page::Settings => Target::Sidebar(0),
+            Page::Search => {
+                if self.titles.results.is_empty() {
+                    Target::Nav(SEARCH_TAB)
+                } else {
+                    Target::Title(0)
+                }
+            }
         }
     }
 
@@ -840,18 +1103,11 @@ impl State {
     /// Pointer paths deliberately do not call this method.
     pub fn reveal_focus(&mut self, controls: &[Control]) -> bool {
         let previous = self.scroll;
-        let previous_home = self.home_scroll;
         if let Some(control) = controls.iter().find(|c| c.target == self.focus) {
-            if self.page == Page::Home && matches!(self.focus, Target::App(_)) {
-                if control.rect.x < HOME_STRIP_LEFT {
-                    self.home_scroll += control.rect.x - HOME_STRIP_LEFT;
-                } else if control.rect.x + control.rect.w > HOME_STRIP_RIGHT {
-                    self.home_scroll += control.rect.x + control.rect.w - HOME_STRIP_RIGHT;
-                }
-            }
             if matches!(
                 self.focus,
                 Target::Nav(_)
+                    | Target::LgSearch
                     | Target::Filter(_)
                     | Target::ClearFilter
                     | Target::Search
@@ -864,6 +1120,8 @@ impl State {
                     self.backgrounds_viewport().y + 8.
                 } else if self.page == Page::Apps {
                     self.apps_viewport().y + 8.
+                } else if self.page == Page::Search {
+                    self.search_viewport().y + 8.
                 } else {
                     120.8
                 };
@@ -876,13 +1134,10 @@ impl State {
                 }
             }
         }
-        if self.page == Page::Home {
-            self.scroll_favorites(0.);
-        }
-        if self.scroll != previous || self.home_scroll != previous_home {
+        if self.scroll != previous {
             self.dirty = true;
         }
-        self.scroll != previous || self.home_scroll != previous_home
+        self.scroll != previous
     }
 
     /// Hover and pointer-down must not move the control before pointer-up.
@@ -935,7 +1190,8 @@ impl State {
         if self.preferences.reduced_motion {
             self.previous_background = None;
         } else {
-            self.previous_background = Some((self.preferences.background.clone(), Instant::now()));
+            self.previous_background =
+                Some((self.preferences.background.clone(), crate::clock::now()));
             self.background_fade = CYCLE_FADE;
         }
         self.preferences.background = id;
@@ -980,7 +1236,7 @@ impl State {
         }
         self.deleting_wallpaper = None;
         if let Err(error) = result {
-            eprintln!("Luma background deletion: {error}");
+            crate::telemetry::log_warn!("wallpapers", "background deletion: {error}");
             self.notify(self.preferences.language.t("deleteBackgroundError"));
             return;
         }
@@ -1056,10 +1312,10 @@ impl State {
                     })
                     .unwrap_or(0),
             ),
-            WIDGETS_SECTION => Target::Widget(4),
-            SYSTEM_SECTION if self.available_update.is_some() => Target::InstallUpdate,
-            SYSTEM_SECTION => Target::CheckUpdates,
-            _ => Target::Setting(0),
+            WIDGETS_SECTION => Target::Widget(5),
+            SYSTEM_SECTION => Target::TvSettings,
+            _ if self.available_update.is_some() => Target::InstallUpdate,
+            _ => Target::CheckUpdates,
         }
     }
 
@@ -1080,7 +1336,7 @@ impl State {
             Some(Subpage::Weather) => Target::Widget(1),
             Some(Subpage::Shortcuts) => Target::Widget(2),
             Some(Subpage::Inputs) => Target::Widget(3),
-            Some(Subpage::Clock) => Target::Setting(1),
+            Some(Subpage::Clock) => Target::Widget(5),
             Some(Subpage::ClockFormat) => {
                 self.subpage = Some(Subpage::Clock);
                 Target::ClockFormat
@@ -1103,6 +1359,7 @@ impl State {
             }
             Some(Subpage::Language) => Target::Setting(4),
             Some(Subpage::TextRendering) => Target::Setting(7),
+            Some(Subpage::HomeAssistant) => Target::Setting(8),
             None => Target::Sidebar(self.section),
         };
         self.scroll = 0.;
@@ -1115,13 +1372,24 @@ impl State {
         if self.recents_open() {
             return self.recent_direction(direction);
         }
+        if self.cameras_open() {
+            return self.camera_direction(direction);
+        }
+        if self.criterion_open() {
+            return self.criterion_direction(direction);
+        }
         if matches!(self.overlay, Some(Overlay::SystemKeyboard)) {
             // The TV keyboard owns its arrows until Done/Back dismisses it.
             return vec![];
         }
         if matches!(
             self.overlay,
-            Some(Overlay::WallpaperUpload | Overlay::TileEditor | Overlay::HomeAssistantSetup)
+            Some(
+                Overlay::WallpaperUpload
+                    | Overlay::TileEditor
+                    | Overlay::StreamingKeys
+                    | Overlay::HomeAssistantSetup
+            )
         ) {
             return vec![];
         }
@@ -1137,13 +1405,36 @@ impl State {
                 })
                 .collect();
             if let Some(index) = slots.iter().position(|slot| ids[*slot] == id) {
+                // Rows follow the drawn grid, where visible input cards come first. A card
+                // never takes an input's place: Up into the inputs stops at the first favorite.
+                let inputs = self
+                    .input_apps
+                    .iter()
+                    .filter(|app| self.input(&app.id).is_some())
+                    .count();
+                let grid = inputs + index;
+                let cells = inputs + slots.len();
                 let next = match direction {
                     Direction::Left => index.saturating_sub(1),
                     Direction::Right => (index + 1).min(slots.len() - 1),
-                    _ => index,
+                    Direction::Up if grid >= HOME_COLUMNS => {
+                        (grid - HOME_COLUMNS).saturating_sub(inputs)
+                    }
+                    // A short last row takes the card from the columns past its end.
+                    Direction::Down if (grid / HOME_COLUMNS + 1) * HOME_COLUMNS < cells => {
+                        (grid + HOME_COLUMNS).min(cells - 1) - inputs
+                    }
+                    Direction::Up | Direction::Down => index,
                 };
                 if next != index {
-                    ids.swap(slots[index], slots[next]);
+                    // Up/Down carry the card across rows and the cards in between shift by
+                    // one; hidden and unavailable favorites keep their saved slots.
+                    let mut visible: Vec<_> = slots.iter().map(|slot| ids[*slot].clone()).collect();
+                    let moved = visible.remove(index);
+                    visible.insert(next, moved);
+                    for (slot, id) in slots.iter().zip(visible) {
+                        ids[*slot] = id;
+                    }
                     self.preferences.favorites = Some(ids);
                     self.dirty = true;
                     return vec![Effect::Save];
@@ -1167,12 +1458,30 @@ impl State {
                             let id = apps[next].id.clone();
                             self.focus(Target::App(id), controls);
                         }
-                        Direction::Up => self.focus(Target::Nav(0), controls),
+                        // Up/Down follow the six-column grid, including offscreen rows.
+                        Direction::Up if index < HOME_COLUMNS => {
+                            self.focus(Target::Nav(0), controls)
+                        }
+                        Direction::Up => {
+                            let id = apps[index - HOME_COLUMNS].id.clone();
+                            self.focus(Target::App(id), controls);
+                        }
+                        Direction::Down
+                            if (index / HOME_COLUMNS + 1) * HOME_COLUMNS < apps.len() =>
+                        {
+                            let id = apps[(index + HOME_COLUMNS).min(apps.len() - 1)].id.clone();
+                            self.focus(Target::App(id), controls);
+                        }
                         Direction::Down => {}
                     }
                     return vec![];
                 }
             }
+            let home_assistant_rows: &[Target] = if self.preferences.home_assistant {
+                &[Target::HomeAssistantToggle, Target::HomeAssistantCode]
+            } else {
+                &[Target::HomeAssistantToggle]
+            };
             let setting_rows: Option<&[Target]> = match self.subpage {
                 Some(Subpage::Greeting) => Some(&[
                     Target::GreetingToggle,
@@ -1182,6 +1491,7 @@ impl State {
                 Some(Subpage::AppNames) => Some(&[Target::AppNamesHome, Target::AppNamesApps]),
                 Some(Subpage::Date) => Some(&[Target::DateToggle, Target::DateFormat]),
                 Some(Subpage::Clock) => Some(&[Target::ClockFormat, Target::ClockTimeFormat]),
+                Some(Subpage::HomeAssistant) => Some(home_assistant_rows),
                 _ => None,
             };
             if let Some(rows) = setting_rows
@@ -1207,6 +1517,7 @@ impl State {
                                 | Target::ClockFormat
                                 | Target::ClockTimeFormat
                                 | Target::DateFormat
+                                | Target::HomeAssistantCode
                         ) =>
                     {
                         return self.activate();
@@ -1225,6 +1536,7 @@ impl State {
                     ) => 2,
                     Some(Subpage::Language) => Language::ALL.len(),
                     Some(Subpage::DateFormat) => crate::model::DateFormat::ALL.len(),
+                    Some(Subpage::Input(_)) => 4,
                     _ => 3,
                 };
                 match direction {
@@ -1255,7 +1567,7 @@ impl State {
                         if self.focus == Target::InputNameReset {
                             Target::InputRename
                         } else {
-                            Target::Choice(2)
+                            Target::Choice(3)
                         },
                         controls,
                     ),
@@ -1311,7 +1623,7 @@ impl State {
             }
             if matches!(
                 self.focus,
-                Target::Setting(0 | 1 | 4 | 7 | 9)
+                Target::Setting(0 | 4 | 7 | 8 | 10)
                     | Target::Widget(_)
                     | Target::InputMode(_)
                     | Target::WeatherLocation
@@ -1336,7 +1648,11 @@ impl State {
                 self.focus(Target::Nav(2), controls);
                 return vec![];
             }
-            if self.focus == Target::Setting(0) && matches!(direction, Direction::Up) {
+            if matches!(
+                self.focus,
+                Target::TvSettings | Target::CheckUpdates | Target::InstallUpdate
+            ) && matches!(direction, Direction::Up)
+            {
                 self.focus(Target::Nav(2), controls);
                 return vec![];
             }
@@ -1418,10 +1734,35 @@ impl State {
                     _ => {}
                 }
             }
+            if self.focus == Target::LgSearch {
+                match direction {
+                    Direction::Left => self.focus(Target::Nav(self.page_index()), controls),
+                    Direction::Down => {
+                        if self.page == Page::Settings {
+                            self.subpage = None;
+                            self.section = 0;
+                        }
+                        self.focus(self.first_content(), controls);
+                    }
+                    _ => {}
+                }
+                return vec![];
+            }
+            if let Target::Nav(2) = self.focus
+                && matches!(direction, Direction::Right)
+                && self.inventory.search.is_some()
+            {
+                self.focus(Target::LgSearch, controls);
+                return vec![];
+            }
             if let Target::Nav(index) = self.focus {
+                // Tabs in drawn order: Search, Home, Apps, Settings.
+                let position = TAB_ORDER.iter().position(|&tab| tab == index).unwrap_or(0);
                 let next = match direction {
-                    Direction::Left if index > 0 => Some(index - 1),
-                    Direction::Right if index < 2 => Some(index + 1),
+                    Direction::Left if position > 0 => Some(TAB_ORDER[position - 1]),
+                    Direction::Right if position + 1 < TAB_ORDER.len() => {
+                        Some(TAB_ORDER[position + 1])
+                    }
                     _ => None,
                 };
                 if let Some(next) = next {
@@ -1455,6 +1796,24 @@ impl State {
                     }
                     return vec![];
                 }
+            }
+            if self.page == Page::Search
+                && let Target::Title(index) = self.focus
+                && matches!(direction, Direction::Up | Direction::Down)
+            {
+                let count = self.titles.results.len();
+                let next = match direction {
+                    Direction::Up if index < TITLE_COLUMNS => Some(Target::Nav(SEARCH_TAB)),
+                    Direction::Up => Some(Target::Title(index - TITLE_COLUMNS)),
+                    Direction::Down if (index / TITLE_COLUMNS + 1) * TITLE_COLUMNS < count => {
+                        Some(Target::Title((index + TITLE_COLUMNS).min(count - 1)))
+                    }
+                    _ => None,
+                };
+                if let Some(next) = next {
+                    self.focus(next, controls);
+                }
+                return vec![];
             }
             if let Target::Background(index) = self.focus {
                 match direction {
@@ -1537,10 +1896,7 @@ impl State {
             }
             if self.page == Page::Settings
                 && matches!(direction, Direction::Left)
-                && !matches!(
-                    self.focus,
-                    Target::Nav(_) | Target::Sidebar(_) | Target::TvSettings
-                )
+                && !matches!(self.focus, Target::Nav(_) | Target::Sidebar(_))
             {
                 if let Target::Background(index) = self.focus {
                     if index % 3 != 0 { /* left follows gallery order */
@@ -1562,13 +1918,11 @@ impl State {
         let next = controls
             .iter()
             .filter(|candidate| candidate.target != self.focus)
-            .filter(|candidate| {
-                self.page != Page::Home
-                    || !matches!(candidate.target, Target::App(_))
-                    || (candidate.rect.x >= HOME_STRIP_LEFT - 0.1
-                        && candidate.rect.x + candidate.rect.w <= HOME_STRIP_RIGHT + 0.1)
-            })
             .filter_map(|candidate| {
+                // The header search button is reached only by Right from the last tab.
+                if candidate.target == Target::LgSearch {
+                    return None;
+                }
                 // Header controls never steal an Up route from the active tab.
                 if self.overlay.is_none()
                     && matches!(direction, Direction::Up)
@@ -1614,6 +1968,13 @@ impl State {
     }
 
     pub fn options(&mut self) {
+        if self.cameras_open() {
+            self.camera_options();
+            return;
+        }
+        if self.criterion_open() {
+            return;
+        }
         if self.overlay.is_some() || self.moving.is_some() {
             return;
         }
@@ -1625,7 +1986,7 @@ impl State {
                 });
                 self.focus = Target::UseBackground;
                 if !self.preferences.reduced_motion {
-                    self.panel_started = Some(Instant::now());
+                    self.panel_started = Some(crate::clock::now());
                 }
                 self.dirty = true;
             }
@@ -1638,19 +1999,16 @@ impl State {
                 restore: self.focus.clone(),
             });
             self.focus = Target::TileTest(id.clone());
-            self.panel_started = (!self.preferences.reduced_motion).then(Instant::now);
+            self.panel_started = (!self.preferences.reduced_motion).then(crate::clock::now);
             self.dirty = true;
         } else if let Target::App(id) = &self.focus {
-            if self.is_input(id) {
-                return;
-            }
             self.overlay = Some(Overlay::Options {
                 id: id.clone(),
                 restore: self.focus.clone(),
             });
             self.focus = Target::OpenApp;
             if !self.preferences.reduced_motion {
-                self.panel_started = Some(Instant::now());
+                self.panel_started = Some(crate::clock::now());
             }
             self.dirty = true;
         }
@@ -1663,7 +2021,7 @@ impl State {
         self.uninstalling = None;
         self.dirty = true;
         if let Err(error) = result {
-            eprintln!("Luma uninstall: {error}");
+            crate::telemetry::log_warn!("apps", "uninstall: {error}");
             self.notify(self.preferences.language.t("deleteAppError"));
             if matches!(&self.overlay, Some(Overlay::Delete { id: current, .. } | Overlay::Options { id: current, .. }) if current == &id)
             {
@@ -1708,12 +2066,66 @@ impl State {
         vec![Effect::Save, Effect::Refresh]
     }
 
+    /// Whether an input counts as a favorite: it has a Home card (On or Auto).
+    pub fn input_favorite(&self, id: &str) -> bool {
+        matches!(
+            self.preferences
+                .input_modes
+                .get(id)
+                .copied()
+                .unwrap_or_default(),
+            InputMode::On | InputMode::Auto
+        )
+    }
+
+    /// "Remove from favorites" moves an input to Apps only; "Add to favorites" returns it to
+    /// Auto. Its card leaves or rejoins the Home strip, and focus moves to a neighbour if needed.
+    fn toggle_input_favorite(&mut self) -> Vec<Effect> {
+        let Some(Overlay::Options { id, restore }) = self.overlay.take() else {
+            return vec![];
+        };
+        self.panel_started = None;
+        let old_ids: Vec<_> = self.apps().iter().map(|a| a.id.clone()).collect();
+        let old_index = old_ids.iter().position(|item| item == &id).unwrap_or(0);
+        let title = self.input_app(&id).map_or(id.clone(), |app| app.title);
+        let (mode, key) = if self.input_favorite(&id) {
+            (InputMode::Apps, "favoriteRemoved")
+        } else {
+            (InputMode::Auto, "favoriteAdded")
+        };
+        self.preferences.input_modes.insert(id, mode);
+        self.notify(self.preferences.language.format(key, &[("app", &title)]));
+        self.focus = restore;
+        self.pointer = false;
+        if let Target::App(id) = &self.focus {
+            let apps = self.apps();
+            if !apps.iter().any(|app| &app.id == id) {
+                self.focus = apps
+                    .get(old_index.min(apps.len().saturating_sub(1)))
+                    .map(|app| Target::App(app.id.clone()))
+                    .unwrap_or_else(|| self.first_content());
+            }
+        }
+        self.dirty = true;
+        vec![Effect::Save]
+    }
+
     pub fn hold(&mut self) {
+        if self.cameras_open() {
+            self.camera_options();
+            return;
+        }
+        if self.criterion_open() {
+            return;
+        }
         if self.page == Page::Home && self.overlay.is_none() {
-            // Input cards stay at the front of the strip; only favorites reorder.
-            if let Target::App(id) = &self.focus
-                && !self.is_input(id)
-            {
+            // Input cards stay at the front of the strip and do not reorder; holding one
+            // opens its options instead, where it can be removed from favorites.
+            if let Target::App(id) = &self.focus {
+                if self.is_input(id) {
+                    self.options();
+                    return;
+                }
                 self.moving = Some(id.clone());
                 self.notice = None;
                 self.dirty = true;
@@ -1746,6 +2158,17 @@ impl State {
                 self.dirty = true;
                 return;
             }
+            if self.keyboard_field == TextField::CameraName {
+                let name = &mut self.cameras.name_draft;
+                let length = name.chars().count();
+                name.extend(
+                    text.chars()
+                        .filter(|c| !c.is_control())
+                        .take(INPUT_NAME_LIMIT.saturating_sub(length)),
+                );
+                self.dirty = true;
+                return;
+            }
             if self.keyboard_field == TextField::InputName {
                 let length = self.input_name.chars().count();
                 self.input_name.extend(
@@ -1753,6 +2176,17 @@ impl State {
                         .filter(|c| !c.is_control())
                         .take(INPUT_NAME_LIMIT.saturating_sub(length)),
                 );
+                self.dirty = true;
+                return;
+            }
+            if self.keyboard_field == TextField::Titles {
+                let length = self.title_query.chars().count();
+                self.title_query.extend(
+                    text.chars()
+                        .filter(|c| !c.is_control())
+                        .take(120usize.saturating_sub(length)),
+                );
+                self.scroll = 0.;
                 self.dirty = true;
                 return;
             }
@@ -1776,6 +2210,10 @@ impl State {
                 self.greeting_name_draft.pop();
             } else if self.keyboard_field == TextField::InputName {
                 self.input_name.pop();
+            } else if self.keyboard_field == TextField::CameraName {
+                self.cameras.name_draft.pop();
+            } else if self.keyboard_field == TextField::Titles {
+                self.title_query.pop();
             } else {
                 self.query.pop();
             }
@@ -1802,6 +2240,66 @@ impl State {
         vec![]
     }
 
+    /// Enter (or Done, or a phone's submit) closes the keyboard like any other route, and on a
+    /// search field moves focus to the first result rather than back to the field.
+    pub fn submit_text_input(&mut self) -> Vec<Effect> {
+        if !self.text_input_active() {
+            return vec![];
+        }
+        let effects = self.finish_text_input();
+        self.focus_first_result();
+        effects
+    }
+
+    fn focus_first_result(&mut self) {
+        match self.keyboard_field {
+            TextField::Apps => {
+                if let Some(app) = self.apps().first() {
+                    self.focus = Target::App(app.id.clone());
+                }
+            }
+            TextField::Titles => {
+                self.title_focus_pending = true;
+                self.focus_pending_title();
+            }
+            _ => {}
+        }
+    }
+
+    /// Moves focus to the first title once the submitted search has settled, if focus is still
+    /// where the keyboard left it.
+    fn focus_pending_title(&mut self) {
+        if !self.title_focus_pending {
+            return;
+        }
+        if self.page != Page::Search
+            || self.overlay.is_some()
+            || self.focus != Target::Nav(SEARCH_TAB)
+        {
+            self.title_focus_pending = false;
+            return;
+        }
+        let typed = if self.streaming_keys.motn {
+            self.title_query.as_str()
+        } else {
+            ""
+        };
+        let titles = &self.titles;
+        let settled = crate::streaming::normalize(typed) == titles.query()
+            && titles.deadline().is_none()
+            && !titles.searching
+            // A failed reply leaves quick-filtered results provisional; it still settles.
+            && (!titles.provisional || titles.error.is_some());
+        if settled && !titles.results.is_empty() {
+            self.focus = Target::Title(0);
+            self.title_focus_pending = false;
+            self.dirty = true;
+        } else if settled {
+            // Nothing found: stay on the field.
+            self.title_focus_pending = false;
+        }
+    }
+
     fn commit_text_input(&mut self) -> Vec<Effect> {
         if self.keyboard_field == TextField::Name {
             let name = std::mem::take(&mut self.greeting_name_draft);
@@ -1812,6 +2310,9 @@ impl State {
                 return vec![Effect::Save];
             }
             return vec![];
+        }
+        if self.keyboard_field == TextField::CameraName {
+            return self.commit_camera_name();
         }
         self.commit_input_name()
     }
@@ -1913,6 +2414,11 @@ impl State {
             self.greeting_name_draft = query;
         } else if self.keyboard_field == TextField::InputName {
             self.input_name = query;
+        } else if self.keyboard_field == TextField::CameraName {
+            self.cameras.name_draft = query;
+        } else if self.keyboard_field == TextField::Titles {
+            self.title_query = query;
+            self.scroll = 0.;
         } else {
             self.query = query;
             self.scroll = 0.;
@@ -1920,12 +2426,31 @@ impl State {
         self.dirty = true;
     }
 
+    /// Replaces what the open field holds, e.g. with text typed on a phone. The usual limits
+    /// apply, as if it had been typed on the TV.
+    pub fn set_editing_text(&mut self, text: &str) {
+        if !self.text_input_active() {
+            return;
+        }
+        match self.keyboard_field {
+            TextField::Location => self.weather.edit(String::new()),
+            TextField::Name => self.greeting_name_draft.clear(),
+            TextField::InputName => self.input_name.clear(),
+            TextField::CameraName => self.cameras.name_draft.clear(),
+            TextField::Apps => self.query.clear(),
+            TextField::Titles => self.title_query.clear(),
+        }
+        self.text(text);
+    }
+
     pub fn editing_text(&self) -> &str {
         match self.keyboard_field {
             TextField::Location => &self.weather.query,
             TextField::Name => &self.greeting_name_draft,
             TextField::InputName => &self.input_name,
+            TextField::CameraName => &self.cameras.name_draft,
             TextField::Apps => &self.query,
+            TextField::Titles => &self.title_query,
         }
     }
     pub fn open_keyboard(&mut self, field: TextField) {
@@ -1938,6 +2463,9 @@ impl State {
             // The TV keyboard starts empty, so a new name replaces the old one.
             self.input_name.clear();
         }
+        if field == TextField::CameraName {
+            self.cameras.name_draft.clear();
+        }
         if cfg!(all(
             feature = "webos",
             target_os = "linux",
@@ -1948,7 +2476,9 @@ impl State {
                 TextField::Location => Target::WeatherQuery,
                 TextField::Name => Target::GreetingName,
                 TextField::InputName => Target::InputRename,
+                TextField::CameraName => Target::CameraRename,
                 TextField::Apps => Target::Search,
+                TextField::Titles => Target::Nav(SEARCH_TAB),
             };
             self.panel_started = None;
             self.dirty = true;
@@ -1957,7 +2487,7 @@ impl State {
         self.overlay = Some(Overlay::Keyboard);
         self.focus = Target::Key(0);
         if !self.preferences.reduced_motion {
-            self.panel_started = Some(Instant::now());
+            self.panel_started = Some(crate::clock::now());
         }
         self.dirty = true;
     }
@@ -1967,7 +2497,7 @@ impl State {
         self.focus = Target::WeatherQuery;
         self.scroll = 0.;
         if !self.preferences.reduced_motion {
-            self.panel_started = Some(Instant::now());
+            self.panel_started = Some(crate::clock::now());
         }
         self.dirty = true;
     }
@@ -1976,8 +2506,161 @@ impl State {
             TextField::Location => Target::WeatherSearch,
             TextField::Name => Target::GreetingName,
             TextField::InputName => Target::InputRename,
+            TextField::CameraName => self
+                .cameras
+                .renaming
+                .as_ref()
+                .map_or(Target::CameraGear, |(id, _)| Target::Camera(id.clone())),
             TextField::Apps => Target::Search,
+            TextField::Titles => Target::Nav(SEARCH_TAB),
         }
+    }
+
+    /// The TV's apps as streaming search ranks them: installed, recently used, favorites.
+    pub fn streaming_services(&self) -> crate::streaming::Services {
+        let installed: Vec<String> = self.inventory.apps.iter().map(|a| a.id.clone()).collect();
+        let recent: Vec<String> = self
+            .recents
+            .entries
+            .iter()
+            .map(|entry| entry.app.id.clone())
+            .collect();
+        let favorites = self.preferences.favorites(&self.inventory.apps);
+        crate::streaming::Services::new(&installed, &recent, &favorites)
+    }
+
+    /// Follows the Apps search text. Returns a search for the worker once typing pauses.
+    pub fn sync_titles(&mut self, now: Instant) -> Option<crate::streaming::Request> {
+        let text = if self.streaming_keys.motn {
+            self.title_query.as_str()
+        } else {
+            ""
+        };
+        if crate::streaming::normalize(text) != self.titles.query() {
+            self.titles.set_text(text, now);
+            self.reconcile_title_focus();
+            self.dirty = true;
+        }
+        self.focus_pending_title();
+        let request = self.titles.due(now)?;
+        self.dirty = true;
+        Some(request)
+    }
+
+    /// A reply from the search worker.
+    pub fn accept_titles(
+        &mut self,
+        request: &crate::streaming::Request,
+        reply: Result<Vec<crate::streaming::Ranked>, String>,
+    ) {
+        if self.titles.accept(request, reply) {
+            self.reconcile_title_focus();
+            self.dirty = true;
+        }
+        self.focus_pending_title();
+    }
+
+    /// Posters to fetch for the current results, or None when nothing changed. Posters of shows
+    /// no longer listed are dropped, so only the visible results hold decoded images.
+    pub fn poster_requests(&mut self) -> Option<Vec<crate::posters::Request>> {
+        let before = self.posters.len();
+        let titles = &self.titles.results;
+        self.posters
+            .retain(|id, _| titles.iter().any(|result| &result.show.id == id));
+        let mut requests = Vec::new();
+        for result in titles {
+            let show = &result.show;
+            if self.posters.contains_key(&show.id) {
+                continue;
+            }
+            self.posters.insert(show.id.clone(), None);
+            if let Some(url) = crate::posters::url(show) {
+                requests.push(crate::posters::Request {
+                    show_id: show.id.clone(),
+                    url: url.to_owned(),
+                    size: crate::posters::SIZE,
+                });
+            }
+        }
+        (self.posters.len() != before || !requests.is_empty()).then_some(requests)
+    }
+
+    /// IMDb IDs whose scores to fetch for the current results, in one batch, or None when
+    /// there are none. Scores of shows no longer listed are dropped.
+    pub fn score_requests(&mut self) -> Option<Vec<String>> {
+        let titles = &self.titles.results;
+        self.scores
+            .retain(|id, _| titles.iter().any(|result| &result.show.imdb_id == id));
+        if !self.streaming_keys.mdblist {
+            return None;
+        }
+        let mut wanted = Vec::new();
+        for result in titles {
+            let id = &result.show.imdb_id;
+            if crate::mdblist::valid_imdb_id(id) && !self.scores.contains_key(id) {
+                self.scores.insert(id.clone(), None);
+                wanted.push(id.clone());
+            }
+        }
+        (!wanted.is_empty()).then_some(wanted)
+    }
+
+    pub fn accept_scores(&mut self, reply: crate::mdblist::Reply) {
+        for (id, scores) in reply {
+            if let Some(slot) = self.scores.get_mut(&id) {
+                *slot = Some(scores);
+                self.dirty = true;
+            }
+        }
+    }
+
+    pub fn accept_poster(
+        &mut self,
+        show_id: &str,
+        poster: Option<std::sync::Arc<crate::cameras::Frame>>,
+    ) {
+        if let Some(slot) = self.posters.get_mut(show_id) {
+            *slot = poster;
+            self.dirty = true;
+        }
+    }
+
+    /// The result shown at the top of the Search page: the focused one, else the first.
+    pub fn selected_title(&self) -> Option<&crate::streaming::Ranked> {
+        let index = match self.focus {
+            Target::Title(index) => index,
+            _ => 0,
+        };
+        self.titles.results.get(index)
+    }
+
+    /// Keeps focus on a result that still exists after the results change.
+    fn reconcile_title_focus(&mut self) {
+        if let Target::Title(index) = self.focus {
+            let count = self.titles.results.len();
+            if index >= count {
+                self.focus = if count > 0 {
+                    Target::Title(count - 1)
+                } else {
+                    self.first_content()
+                };
+            }
+        }
+    }
+
+    fn launch_title(&mut self, index: usize) -> Vec<Effect> {
+        let Some(result) = self.titles.results.get(index) else {
+            return vec![];
+        };
+        let Some(pick) = &result.pick else {
+            self.notify(self.preferences.language.t("titleNotOnApps"));
+            return vec![];
+        };
+        vec![Effect::LaunchTitle {
+            app: pick.app_id.clone(),
+            service: pick.service_id.clone(),
+            link: pick.link.clone(),
+        }]
     }
 
     pub fn activate(&mut self) -> Vec<Effect> {
@@ -1989,6 +2672,12 @@ impl State {
                 _ => vec![],
             };
         }
+        if self.cameras_open() {
+            return self.camera_activate();
+        }
+        if self.criterion_open() {
+            return self.criterion_activate();
+        }
         if self.moving.take().is_some() {
             // Order was saved at every move. A fresh OK release finishes the
             // mode and keeps the selected favorite, rather than launching it.
@@ -1996,13 +2685,16 @@ impl State {
             return vec![];
         }
         self.dirty = true;
-        if self.page != Page::Apps
-            && let Target::App(id) = &self.focus
+        if let Target::App(id) = &self.focus
             && let Some(tile) = self.preferences.custom_tile(id).cloned()
         {
             return self.send_tile(tile);
         }
         match self.focus.clone() {
+            // On the Search page, OK on its own tab (the field) brings the keyboard back.
+            Target::Nav(SEARCH_TAB) if self.page == Page::Search => {
+                self.open_keyboard(TextField::Titles)
+            }
             Target::Nav(index) => self.open(index),
             Target::Browse => self.open(1),
             Target::Retry => return vec![Effect::Reload],
@@ -2021,13 +2713,18 @@ impl State {
                 self.pressed = None;
             }
             Target::TvSettings => return vec![Effect::Launch("com.palm.app.settings".into())],
-            Target::App(_) if self.page == Page::Apps && !self.launching => self.options(),
+            Target::LgSearch if !self.launching => {
+                if let Some(id) = self.inventory.search.clone() {
+                    return vec![Effect::Launch(id)];
+                }
+            }
+            Target::Title(index) if !self.launching => return self.launch_title(index),
             Target::App(id) if !self.launching => {
                 return vec![Effect::Launch(id)];
             }
             Target::OpenApp if !self.launching => {
                 if let Some(Overlay::Options { id, .. }) = &self.overlay
-                    && self.inventory.apps.iter().any(|app| &app.id == id)
+                    && (self.inventory.apps.iter().any(|app| &app.id == id) || self.is_input(id))
                 {
                     let id = id.clone();
                     self.back();
@@ -2072,7 +2769,7 @@ impl State {
                     self.preferences.temperature_unit == Unit::Fahrenheit,
                 ));
                 if !self.preferences.reduced_motion {
-                    self.panel_started = Some(Instant::now());
+                    self.panel_started = Some(crate::clock::now());
                 }
             }
             Target::WeatherQuery => self.open_keyboard(TextField::Location),
@@ -2089,7 +2786,7 @@ impl State {
                 self.focus = Target::Choice(self.preferences.date_format.index());
                 self.scroll = 0.;
                 if !self.preferences.reduced_motion {
-                    self.panel_started = Some(Instant::now());
+                    self.panel_started = Some(crate::clock::now());
                 }
             }
             Target::GreetingName => self.open_keyboard(TextField::Name),
@@ -2120,16 +2817,27 @@ impl State {
                 }));
                 self.scroll = 0.;
                 if !self.preferences.reduced_motion {
-                    self.panel_started = Some(Instant::now());
+                    self.panel_started = Some(crate::clock::now());
                 }
             }
             Target::InputRename => self.open_keyboard(TextField::InputName),
+            Target::HomeAssistantToggle => {
+                self.preferences.home_assistant = !self.preferences.home_assistant;
+                self.sync_custom_tiles();
+                self.reconcile_focus();
+                if self.preferences.home_assistant {
+                    self.open_home_assistant_setup();
+                }
+                return vec![Effect::Save];
+            }
+            Target::HomeAssistantCode => self.open_home_assistant_setup(),
             Target::Widget(index) => {
                 let (subpage, focus) = match index {
                     0 => (Subpage::Greeting, Target::GreetingToggle),
                     1 => (Subpage::Weather, Target::WeatherToggle),
                     2 => (Subpage::Shortcuts, Target::TileEditor),
                     4 => (Subpage::Date, Target::DateToggle),
+                    5 => (Subpage::Clock, Target::ClockFormat),
                     3 => (
                         Subpage::Inputs,
                         self.inventory
@@ -2145,7 +2853,7 @@ impl State {
                 self.focus = focus;
                 self.scroll = 0.;
                 if !self.preferences.reduced_motion {
-                    self.panel_started = Some(Instant::now());
+                    self.panel_started = Some(crate::clock::now());
                 }
             }
             Target::InstallUpdate => {
@@ -2234,35 +2942,53 @@ impl State {
                         self.focus = Target::AppNamesHome;
                         self.scroll = 0.;
                         if !self.preferences.reduced_motion {
-                            self.panel_started = Some(Instant::now());
+                            self.panel_started = Some(crate::clock::now());
                         }
-                        return vec![];
-                    }
-                    1 => {
-                        self.subpage = Some(Subpage::Clock);
-                        self.scroll = 0.;
-                        if !self.preferences.reduced_motion {
-                            self.panel_started = Some(Instant::now());
-                        }
-                        self.focus = Target::ClockFormat;
                         return vec![];
                     }
                     2 => self.preferences.reduced_motion = !self.preferences.reduced_motion,
-                    8 => {
-                        self.preferences.home_assistant = !self.preferences.home_assistant;
-                        if self.preferences.home_assistant {
-                            self.open_home_assistant_setup();
+                    12 => {
+                        // Not while an update downloads or installs: it came from the old channel.
+                        if self.update_busy() {
+                            return vec![];
                         }
+                        // Another channel: what it offers is checked again right away.
+                        self.preferences.nightly_updates = !self.preferences.nightly_updates;
+                        crate::update::set_nightly(self.preferences.nightly_updates);
+                        self.available_update = None;
+                        self.update = crate::update::InstallStatus::Idle;
+                        self.update_status = crate::update::Status::Checking;
+                        self.update_check_requested = true;
                     }
-                    9 => {
-                        self.open_home_assistant_setup();
+                    11 => {
+                        self.preferences.luma_home = !self.preferences.luma_home;
+                        return if self.preferences.luma_home {
+                            vec![Effect::Save, Effect::ReclaimHome]
+                        } else {
+                            vec![Effect::Save]
+                        };
+                    }
+                    8 => {
+                        self.subpage = Some(Subpage::HomeAssistant);
+                        self.focus = Target::HomeAssistantToggle;
+                        self.scroll = 0.;
+                        if !self.preferences.reduced_motion {
+                            self.panel_started = Some(crate::clock::now());
+                        }
+                        return vec![];
+                    }
+                    10 => {
+                        self.key_editor = None;
+                        self.overlay = Some(Overlay::StreamingKeys);
+                        self.focus = Target::CloseDialog;
+                        self.pressed = None;
                         return vec![];
                     }
                     4 => {
                         self.subpage = Some(Subpage::Language);
                         self.focus = Target::Choice(self.preferences.language.index());
                         if !self.preferences.reduced_motion {
-                            self.panel_started = Some(Instant::now());
+                            self.panel_started = Some(crate::clock::now());
                         }
                         return vec![];
                     }
@@ -2272,7 +2998,7 @@ impl State {
                         self.focus = Target::Choice(self.preferences.text_rendering.index());
                         self.scroll = 0.;
                         if !self.preferences.reduced_motion {
-                            self.panel_started = Some(Instant::now());
+                            self.panel_started = Some(crate::clock::now());
                         }
                         return vec![];
                     }
@@ -2304,7 +3030,7 @@ impl State {
                 }
                 if !self.preferences.reduced_motion && self.preferences.background != id {
                     self.previous_background =
-                        Some((self.preferences.background.clone(), Instant::now()));
+                        Some((self.preferences.background.clone(), crate::clock::now()));
                     self.background_fade = BACKGROUND_FADE;
                 }
                 self.preferences.splash_background = Some(if crate::wallpapers::valid_id(&id) {
@@ -2338,12 +3064,13 @@ impl State {
                     .unwrap_or_default();
                 self.subpage = Some(Subpage::Input(id));
                 if !self.preferences.reduced_motion {
-                    self.panel_started = Some(Instant::now());
+                    self.panel_started = Some(crate::clock::now());
                 }
                 self.focus = Target::Choice(match mode {
                     InputMode::On => 0,
                     InputMode::Off => 1,
                     InputMode::Auto => 2,
+                    InputMode::Apps => 3,
                 });
             }
             Target::Choice(index) => {
@@ -2356,7 +3083,12 @@ impl State {
                     Some(Subpage::Input(id)) => {
                         self.preferences.input_modes.insert(
                             id,
-                            [InputMode::On, InputMode::Off, InputMode::Auto][index.min(2)],
+                            [
+                                InputMode::On,
+                                InputMode::Off,
+                                InputMode::Auto,
+                                InputMode::Apps,
+                            ][index.min(3)],
                         );
                     }
                     Some(Subpage::Temperature) => {
@@ -2370,6 +3102,8 @@ impl State {
                         self.preferences.language =
                             Language::ALL[index.min(Language::ALL.len() - 1)];
                         self.weather.cancel_search();
+                        // The Cameras app's title is translated.
+                        self.sync_custom_tiles();
                     }
                     Some(Subpage::TextRendering) => {
                         let mode = TextRendering::ALL[index.min(TextRendering::ALL.len() - 1)];
@@ -2386,7 +3120,8 @@ impl State {
                         | Subpage::Clock
                         | Subpage::Weather
                         | Subpage::Shortcuts
-                        | Subpage::Inputs,
+                        | Subpage::Inputs
+                        | Subpage::HomeAssistant,
                     ) => {
                         return vec![];
                     }
@@ -2396,6 +3131,15 @@ impl State {
                 return vec![Effect::Save];
             }
             Target::Option(index) => {
+                if let Some(Overlay::Options { id, .. }) = &self.overlay
+                    && self.is_input(id)
+                {
+                    return if index == 0 {
+                        self.toggle_input_favorite()
+                    } else {
+                        vec![]
+                    };
+                }
                 if index == 2 {
                     if let Some(Overlay::Options { id, restore }) = &self.overlay
                         && crate::platform::can_uninstall(id)
@@ -2513,13 +3257,17 @@ impl State {
                     TextField::Location => self.weather.edit(String::new()),
                     TextField::Name => self.greeting_name_draft.clear(),
                     TextField::InputName => self.input_name.clear(),
+                    TextField::CameraName => self.cameras.name_draft.clear(),
                     TextField::Apps => self.query.clear(),
+                    TextField::Titles => self.title_query.clear(),
                 },
                 "Done" => {
                     self.overlay = None;
                     self.panel_started = None;
                     self.focus = self.keyboard_return();
-                    return self.commit_text_input();
+                    let effects = self.commit_text_input();
+                    self.focus_first_result();
+                    return effects;
                 }
                 key => self.text(key),
             },
@@ -2531,6 +3279,12 @@ impl State {
     pub fn back(&mut self) -> Vec<Effect> {
         self.pointer = false;
         self.dirty = true;
+        if self.cameras_open() {
+            return self.camera_back();
+        }
+        if self.criterion_open() {
+            return self.criterion_back();
+        }
         if self.moving.take().is_some() {
             return vec![];
         }
@@ -2555,17 +3309,26 @@ impl State {
             }
             if matches!(overlay, Overlay::HomeAssistantSetup) {
                 self.home_assistant_qr = None;
-                self.focus = Target::Setting(if self.preferences.home_assistant {
-                    9
-                } else {
-                    8
-                });
+                self.home_assistant_paired = None;
+                self.focus = self.home_assistant_restore.take().unwrap_or(
+                    if self.preferences.home_assistant {
+                        Target::HomeAssistantCode
+                    } else {
+                        Target::HomeAssistantToggle
+                    },
+                );
                 self.pressed = None;
                 return vec![];
             }
             if matches!(overlay, Overlay::TileEditor) {
                 self.tile_editor = None;
                 self.focus = Target::TileEditor;
+                self.pressed = None;
+                return vec![];
+            }
+            if matches!(overlay, Overlay::StreamingKeys) {
+                self.key_editor = None;
+                self.focus = Target::Setting(10);
                 self.pressed = None;
                 return vec![];
             }
@@ -2577,7 +3340,7 @@ impl State {
             }
             if matches!(overlay, Overlay::Recents { .. }) {
                 self.recents.closing_focus = Some(self.focus.clone());
-                self.recents.updated = Instant::now();
+                self.recents.updated = crate::clock::now();
                 self.pressed = None;
                 if self.preferences.reduced_motion {
                     self.recents.visibility = 0.;
@@ -2597,6 +3360,10 @@ impl State {
             self.close_subpage();
             return vec![];
         }
+        if self.focus == Target::LgSearch {
+            self.focus = Target::Nav(self.page_index());
+            return vec![];
+        }
         if self.page == Page::Settings && !matches!(self.focus, Target::Nav(_)) {
             if matches!(self.focus, Target::Sidebar(_)) {
                 self.focus = Target::Nav(2);
@@ -2609,6 +3376,18 @@ impl State {
         if self.page == Page::Apps && matches!(self.focus, Target::Search | Target::ClearSearch) {
             self.query.clear();
             self.focus = Target::Nav(1);
+            self.scroll = 0.;
+            return vec![];
+        }
+        // A filtered app, reached from the field by Enter or Down, steps back to the field.
+        if self.page == Page::Apps && !self.query.is_empty() && matches!(self.focus, Target::App(_))
+        {
+            self.focus = Target::Search;
+            self.scroll = 0.;
+            return vec![];
+        }
+        if self.page == Page::Search && matches!(self.focus, Target::Title(_)) {
+            self.focus = Target::Nav(SEARCH_TAB);
             self.scroll = 0.;
             return vec![];
         }

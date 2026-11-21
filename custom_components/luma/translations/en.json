@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Add a TV running Luma",
-        "description": "On the TV, open Luma → Settings → General and turn on Home Assistant. Luma shows the address to enter here.",
+        "description": "On the TV, open Luma → Settings → System → Home Assistant and turn it on. Luma shows the address to enter here.",
         "data": { "host": "TV address", "port": "Port" }
       },
       "discovery_confirm": {
@@ -35,12 +35,127 @@
       "reauth_successful": "Paired again."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Luma",
+        "menu_options": {
+          "phone_keyboard": "Type on your phone",
+          "streaming_keys": "Streaming search keys",
+          "criterion_account": "Criterion Channel account",
+          "developer_access": "Developer access"
+        }
+      },
+      "developer_access": {
+        "title": "Developer access",
+        "description": "For developing Luma: lets cloud development sessions (such as Claude Code) SSH to this TV for up to 8 hours at a time. Each request waits for your tap on the phone chosen here; Home Assistant then adds a new key to the TV and removes it when it expires. Off by default.\n\nHome Assistant's own key for the TV: append this line to `/home/root/.ssh/authorized_keys` on the TV.\n\n`{authorized_keys_line}`",
+        "data": {
+          "dev_access": "Allow developer access",
+          "dev_access_phone": "Phone that approves requests",
+          "dev_access_ssh_port": "TV SSH port",
+          "dev_access_tunnel_hostname": "Tunnel hostname (optional)",
+          "dev_access_cloudflare_client_id": "Cloudflare Access service token Client ID (optional)",
+          "dev_access_cloudflare_client_secret": "Cloudflare Access service token Client Secret (optional)",
+          "dev_access_rotate_token": "Make a new dev token (the old one stops working)",
+          "dev_access_forget_host_key": "Forget the TV's SSH host key (after a TV reset)"
+        },
+        "data_description": {
+          "dev_access_phone": "Only this phone's Home Assistant app can approve. Requests show Approve and Deny.",
+          "dev_access_tunnel_hostname": "A Cloudflare Access tunnel to the TV's SSH, for sessions outside your network. Empty: sessions connect to the TV's address directly.",
+          "dev_access_cloudflare_client_id": "Handed to approved sessions so cloudflared reaches the tunnel without a login."
+        }
+      },
+      "developer_token": {
+        "title": "Dev token",
+        "description": "**Dev token** (shown only now). Give it to the development environment as `LUMA_DEV_TOKEN`; it can only ask for access, which you approve on your phone.\n\n`{token}`\n\nIf you have not yet, append Home Assistant's key line to `/home/root/.ssh/authorized_keys` on the TV:\n\n`{authorized_keys_line}`"
+      },
+      "phone_keyboard": {
+        "title": "Type on your phone",
+        "description": "When a text field opens on the TV, such as search, these phones get a notification. Reply to it to type into the TV instead of using the remote. Phones need the Home Assistant app.",
+        "data": {
+          "keyboard_phones": "Phones",
+          "keyboard_entity": "Type from Home Assistant too"
+        },
+        "data_description": {
+          "keyboard_phones": "None chosen turns this off. Phones only appear here once the Home Assistant app is signed in on them.",
+          "keyboard_entity": "Adds a TV keyboard text entity, available only while a text field is open on the TV. Put it on a dashboard to type into the TV from there."
+        }
+      },
+      "streaming_keys": {
+        "title": "Streaming search keys",
+        "description": "Luma's search uses Movie of the Night to find where a show streams, TMDB to rank results and, optionally, MDBList for Rotten Tomatoes and IMDb scores. Keys are checked when you submit, then kept in sync with the TV.\n\nLeave a field empty to keep the key already on the TV.",
+        "data": {
+          "motn_api_key": "Movie of the Night key",
+          "tmdb_read_access_token": "TMDB read access token",
+          "mdblist_api_key": "MDBList key (optional)"
+        },
+        "data_description": {
+          "motn_api_key": "Get one at [Movie of the Night]({motn_url}). It starts with `motn-key-`. A RapidAPI Streaming Availability key also works.",
+          "tmdb_read_access_token": "The long **API Read Access Token** in your [TMDB API settings]({tmdb_url}), not the short API key.",
+          "mdblist_api_key": "For review scores on each poster. Find it in [MDBList's preferences]({mdblist_url}) under API access."
+        }
+      },
+      "criterion_account": {
+        "title": "Criterion Channel account",
+        "description": "Luma's Criterion Channel player signs in with this account, so you never type a password with the remote. It is sent to the TV, which gives it only to its Criterion player on the Channel's sign-in page.\n\nClear both fields to remove the account from the TV.",
+        "data": { "criterion_email": "Email", "criterion_password": "Password" }
+      }
+    },
+    "error": {
+      "motn_refused": "Movie of the Night refused this key. Check it is complete and the subscription is active.",
+      "tmdb_refused": "TMDB refused this token. Use the API Read Access Token, not the API key.",
+      "mdblist_refused": "MDBList refused this key. Copy the whole key from mdblist.com → Preferences.",
+      "phone_required": "Choose the phone that approves requests.",
+      "cloudflare_pair": "Enter both the Client ID and the Client Secret, or neither.",
+      "criterion_pair": "Enter both the email and the password, or neither.",
+      "criterion_email": "Enter the email address you sign in to the Criterion Channel with."
+    }
+  },
   "entity": {
-    "button": { "dismiss_overlay": { "name": "Dismiss overlay" } },
-    "notify": { "toast": { "name": "Toast" } }
+    "button": {
+      "dismiss_overlay": { "name": "Dismiss overlay" },
+      "example_camera": { "name": "Show example camera card" },
+      "example_toast": { "name": "Show example toast" },
+      "dev_access_approve": { "name": "Approve developer access request" },
+      "dev_access_deny": { "name": "Deny developer access request" },
+      "dev_access_revoke": { "name": "Revoke all developer access" }
+    },
+    "notify": { "toast": { "name": "Toast" } },
+    "text": { "keyboard": { "name": "TV keyboard" } },
+    "sensor": {
+      "frame_time": { "name": "Frame time" },
+      "dropped_frames": { "name": "Dropped frames" },
+      "memory": { "name": "Memory" },
+      "cpu": { "name": "CPU" },
+      "last_problem": { "name": "Last problem" },
+      "dev_access": {
+        "name": "Developer access",
+        "state": {
+          "idle": "Idle",
+          "pending": "Waiting for approval",
+          "active": "Session key on the TV"
+        }
+      }
+    }
+  },
+  "issues": {
+    "tv_outdated": {
+      "title": "Update Luma on {name}",
+      "description": "The Luma app on {name} is older than this Home Assistant integration needs, so some features will not work. Update Luma from its Settings on the TV, then this notice goes away on its own."
+    },
+    "integration_outdated": {
+      "title": "Update the Luma integration for {name}",
+      "description": "Luma on {name} needs a newer version of this integration. Update Luma for LG webOS in HACS and restart Home Assistant, then this notice goes away on its own."
+    }
   },
   "selector": {
-    "mode": { "options": { "stream": "Live (MJPEG)", "snapshot": "Snapshots" } },
+    "mode": {
+      "options": {
+        "video": "Live video (HLS)",
+        "stream": "Live (MJPEG)",
+        "snapshot": "Snapshots"
+      }
+    },
     "position": {
       "options": {
         "top-right": "Top right",
@@ -74,7 +189,7 @@
         },
         "mode": {
           "name": "Mode",
-          "description": "Live motion-JPEG (falls back to snapshots), or snapshots only."
+          "description": "Live video (the default) plays a camera entity's HLS stream at its full frame rate (shows motion-JPEG until it plays, or if it cannot). Live motion-JPEG falls back to snapshots. Or snapshots only."
         },
         "refresh": {
           "name": "Snapshot interval",

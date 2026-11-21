@@ -54,7 +54,6 @@ including `armv7-unknown-linux-gnueabi` for TV builds. No browser installation i
 | `pnpm test`               | Release-tooling and Rust workspace unit tests              |
 | `pnpm test:icons`         | Mocked runtime icon reads and bundled vector checks        |
 | `pnpm test:smoke`         | Desktop rendering, mocked weather and localization checks  |
-| `pnpm changeset`          | Add a release note and requested version bump to a PR      |
 | `pnpm version:check`      | Check synchronized app release versions                    |
 
 The TV target is ARMv7 **soft-float calling convention**, `gnueabi`, not `gnueabihf`. Codegen
@@ -98,8 +97,20 @@ It does not execute the test suites. A desktop display is required; on headless 
 Backspace deletes while editing. Native Back uses SDL's webOS-specific keycode. Back dismisses
 the keyboard first; Weather Location then returns to its parent Location row, HDMI choices to
 that HDMI row, and the Background gallery to Background in the sidebar. Back from the sidebar
-focuses the Settings tab, then returns Home. **System** in the sidebar groups **Refresh apps & inputs**
-and the vector power-icon **Quit app** action separately from General preferences.
+focuses the Settings tab, then returns Home. The header holds Search, Home, Apps and Settings, and at
+the right margin a search button (`Target::LgSearch`) that launches LG's own search app. It is
+shown only when `listApps` reports one: `platform::lg_search_app` takes the first known ID
+(`com.webos.app.search`, `…searchapp`, `…lgsearch`, `…searchviewer`), else any LG system app
+with "search" in its ID, else `com.webos.app.voice`; the inventory log names the choice and
+every search/voice app seen. Only Right from the Settings tab focuses it (geometric moves skip
+it); Left and Back return to the current tab, Down to the page's content.
+**General** holds a single update row: the installed version and when it was last checked
+(`State::update_checked`), with **Check now** (or **Install**) as a button on the right.
+**System** lists **TV settings** (`Target::TvSettings`, which launches `com.palm.app.settings`),
+**App names**, **Language**, **Reduced motion**, **Home Assistant**, **Text rendering**,
+**Refresh apps & inputs** and the vector power-icon **Quit app** action. **Home Assistant** opens
+a subpage with the on/off toggle and, while on, **Add to Home Assistant**, which reopens the HACS
+QR code.
 On Apps, OK or a normal pointer click on an app opens its side popup, with **Open** first and focused by
 default, followed by favorite, hide/show and **Delete app** actions. A second OK launches the app.
 Home favorites, Inputs and Recent apps launch directly. Hold OK on Home still reorders favorites.
@@ -132,9 +143,9 @@ in-memory sample inventory. Verify app opening, real deletion, denial and focus 
 manually on a TV, including Home-takeover mode.
 The **Clock** subpage contains **Clock format** (12-hour or 24-hour) and **Time format** (`HH:MM`
 or `HH:MM:SS`, defaulting to `HH:MM`). Choosing a format returns to its row in Clock, and Back
-from Clock restores its General row. With seconds shown, the header clock redraws once per second
+from Clock restores its Widgets row (Clock sits above Date). With seconds shown, the header clock redraws once per second
 instead of once per minute. Existing saved hour and seconds preferences are retained.
-General has an **App names** subpage with independent **Show on Home** and **Show on Apps** toggles.
+System has an **App names** subpage with independent **Show on Home** and **Show on Apps** toggles.
 Home captions default to off and Apps captions default to on, stored independently in `show_home_names`
 and `show_app_names`. The legacy `show_names` preference does not override these defaults. Hidden
 captions do not reserve layout space.
@@ -159,13 +170,16 @@ Long greetings scale down to fit their existing single-line area, centred vertic
 moving the weather summary or favorite cards. Short greetings retain their original size.
 The keyboard starts empty; closing it without a name preserves the saved value. Clear name removes
 it. Preferences are saved when the keyboard closes, including automatic system-keyboard dismissal.
-Back from Greeting restores its Widgets row; App names returns to General. Input name removal
+Back from Greeting restores its Widgets row; App names returns to System. Input name removal
 also uses **Clear name**.
 Choice checkmarks identify saved values, while the bright row fill identifies only the current focus.
 
-Home favorites form one horizontal strip, never a second row. Left/Right follows saved order,
-including reorder mode, and reveals complete cards. Up returns to Home navigation. The strip position survives page changes. Wheel movement over
-favorites scrolls horizontally; elsewhere it scrolls vertically. Pointer hover/down never moves
+Home favorites fill six columns, then wrap onto further rows that scroll vertically into view.
+Left/Right follows saved order, Up/Down follows six-column grid indices (including offscreen rows),
+and Up from the first row returns to Home navigation. Reorder mode moves a card by one slot with
+Left/Right and by one row with Up/Down. A favorite launched from Home, Apps or recents moves to the
+front once it opens and the order is saved (a failed launch changes nothing), so Home lists the most recently used favorites first; apps that are
+not favorites are never added. Wheel movement scrolls vertically. Pointer hover/down never moves
 the clicked control. Apps Up/Down follows the six-column grid order, including offscreen rows,
 and only the first row's Up route reaches the category toolbar. Scrolling Apps content fades into
 the existing wallpaper at the header/footer, with one alpha mask for surfaces, shadows, rings,
@@ -185,10 +199,28 @@ the cable is present and the TV does not report `hdmiSignalExist: false`, so a c
 unplugged or switched off takes no slot and the cards after it close the gap. A stale positive
 signal cannot override an unplugged cable. Firmware without signal information falls back to the
 cable state. **On** keeps the card (with **No signal** in its corner) and **Off** hides it.
+**Apps only** keeps the input off the Home strip and instead lists it at the front of the Apps
+page's All tab, under the same connected-with-signal test as Auto. It is meant for sources such as
+a soundbar that rarely need their own card. There it opens the input on OK and is found by search
+under its card title or port; it never appears in category tabs or Hidden.
 
-Visible HDMI inputs are cards at the far left of the Home favorites strip, ordered by port, rather
-than a separate row. They launch like apps but are not favorites: they cannot be reordered, hidden
-from Apps or opened in app options, and they do not appear on the Apps page. Visibility and names
+When Luma runs as Home and another app is in front, the platform worker reads the foreground
+app every five seconds through the same direct-or-Homebrew path as other sam/EIM reads. While an
+HDMI input is in front it reads every two seconds, and also reads tvpower's power state and then
+the inputs only while the TV is `Active` with no pending power change. An input that was seen with
+a signal and then reports `hdmiSignalExist: false` or an unplugged cable for five seconds sends
+the TV back to Home, so switching a console off returns to Luma instead of a **No signal**
+screen. An input opened while its source is still off is left alone, brief drops (mode switches,
+HDCP) do not count, and standby disarms the watch so a console following the TV off over CEC
+never launches Home. A failed read is logged and retried after thirty seconds. Luma run as a plain
+app does not watch inputs, since Home would then be LG's own.
+
+Visible HDMI inputs are the first cards of the Home favorites grid, ordered by port, rather
+than a separate row. They launch like apps and cannot be reordered, hidden or deleted. Holding OK on
+an input card (or pressing the options key) opens its options: **Open** and **Remove from
+favorites**, which switches the input to **Apps only**. On the Apps page an Apps-only input opens
+the same options with **Add to favorites**, which returns it to **Auto**. Only **Apps only**
+inputs appear on the Apps page. Visibility and names
 stay in **Settings → Widgets → Inputs**. Each card shows its port in the corner. A recognized console gives the card its name, brand mark and official
 colour: Xbox (#107C10), Nintendo Switch (#E60012) or PlayStation (#003791). Recognition reads what the source reports
 about itself in `getAllInputStatus`: the HDMI SPD InfoFrame vendor/product and CEC OSD name fields
@@ -201,6 +233,10 @@ name replaces the title, and a name such as "Switch" also picks the colour. Whic
 TV firmware fills has not been verified on hardware.
 
 System text events update app/location queries; Done/Back stops editing and restores focus.
+On the Apps and Search fields, Enter/Done (`State::submit_text_input`, also a phone's submit) moves
+focus to the first result instead; on Search it waits for the reply and gives up if focus moves first.
+On the TV this needs the system keyboard to forward Return: a panel closed without it is taken as
+Back (`finish_text_input`), which cannot tell Done from Back.
 
 ### Recent apps
 
@@ -381,18 +417,25 @@ Verify scanning, editing and a test request against a real webhook on TV hardwar
 
 ## Home Assistant overlay
 
-**Settings → General → Home Assistant** (`home_assistant`, default Off) starts a persistent
+**Settings → System → Home Assistant** (`home_assistant`, default Off) starts a persistent
 listener on port 5862 (`src/home_assistant.rs`), unlike the short-lived companion sessions. It binds
 every interface, because the TV's address can change, and answers only loopback, private and
 link-local peers. Requests are small and handled in turn on the service's own thread, with a
-three-second deadline and a 16 KiB body limit, reusing `companion::request`.
+three-second deadline and a 32 KiB body limit, reusing `companion::request`.
 
-Pairing: `POST /api/pair` shows a six-digit code as a system toast (and a Luma notice when Luma is
-in front). `POST /api/pair/confirm` trades it for a 256-bit token. Codes expire after two minutes,
+Pairing: `POST /api/pair` shows a six-digit code as a system toast. In Luma, `Event::PairingCode`
+puts it in the setup dialog in place of the QR code (`State::home_assistant_pairing`), opening the
+dialog when no other dialog is up and returning focus afterwards; otherwise it is a notice.
+`Event::PairingEnded` (expired or locked out) brings the QR code back, and `Event::Paired` shows a
+confirmation in the dialog. `POST /api/pair/confirm` trades it for a 256-bit token. Codes expire after two minutes,
 five wrong codes cancel the request, new requests are rate-limited, and at most eight servers
 pair. `home-assistant.json`, next to the preferences file, stores a stable device ID and SHA-256
 digests of tokens with mode 0600. Turning the setting off closes the listener, closes any overlay
-and forgets every pairing. Requests with an `Origin` header are refused, except the overlay page's
+and forgets every pairing, but not the camera arrangement: each server's entries move to
+`Gallery::parked` (by entity ID) and are restored when the same server pairs again, matched by
+the Home Assistant instance ID the integration sends as `server`, or by its name when either side
+has none and no other parked server shares that name. Unpairing one server parks its entries the same way; at most 16 are kept. Requests with
+an `Origin` header are refused, except the overlay page's
 close report, which must come from loopback with the session's random nonce.
 
 The overlay is a separate web app, `overlay/` (`com.ecklf.luma.overlay`), because only a web app's
@@ -418,7 +461,191 @@ The Home Assistant integration lives in `custom_components/luma` (installable th
 keeps only those where `GET /api/info` answers as Luma, suggests hosts and names from existing
 `webostv` entries, pairs in its config flow, and starts reauth when the TV answers 401. For a
 camera entity it sends Home Assistant's `camera_proxy_stream`/`camera_proxy` URLs signed with the
-camera's access token, from the internal URL unless `base_url` is given.
+camera's access token, from the internal URL unless `base_url` is given. The **Show example camera card**
+button sends a snapshot-only overlay of `custom_components/luma/example.jpg`, served without auth at
+`/api/luma/example.jpg`, so owners can preview the card without a camera.
+
+**Cameras app.** Each loaded config entry also sends `POST /api/cameras` with every available
+(Frigate's cameras, `SECOND_COPIES`, carry `hidden: true` as copies of cameras another integration
+provides: Luma hides such a camera until a saved arrangement lists it)
+camera entity (sorted by name, at most 32) and its signed proxy URLs: once at setup and two seconds
+after any `camera.*` state change, which includes every access-token rotation, coalescing bursts.
+Every minute it also reads `GET /api/status`, whose `cameras` counts only the asking server's list, and resends when it is 0, since
+Luma keeps lists in memory only, one per paired server (keyed by token digest, merged in pairing
+order; unpairing drops that server's list). While Home Assistant is on, `State::sync_custom_tiles` adds the
+built-in `luma.cameras` app (`model::CAMERAS_APP`, the shortcut tiles' `custom` surface, `camera` mark) to the inventory,
+so it can be favorited, hidden and searched; `model::is_builtin` keeps it out of uninstall and
+inventory-failure checks. Launching it sets `State::show_cameras`; the main loop asks the
+service's thread, which answers with `Event::Cameras { open: true }` (or an `Event::Notice` for
+a missing pairing or empty list) carrying every camera as `cameras::Camera`, in the owner's saved
+order with `hidden` flags and the live-video choice. Changed lists (rotated tokens, unpairing,
+turning the setting off) arrive with `open: false`; an open gallery keeps its arrangement on
+screen, takes the new URLs and adds new cameras at the end, and an empty list closes it.
+
+The gallery is native (`src/cameras.rs`, drawn by `src/cameras-view.rs`) and opens as the
+opaque full-screen `Overlay::Cameras`. `cameras::Layout` keeps 16:9 tiles in one large view, 2×2,
+or three across from five cameras, fitting two rows and scrolling the rest. Hold OK → **Rename**
+opens the keyboard (`TextField::CameraName`) in the overlay's place, with `Gallery::renaming`
+keeping the camera and the gallery's Back target, so the gallery stays drawn and fed behind it
+(`State::cameras_visible`); committing restores `Overlay::Cameras`. Names are saved with the
+arrangement (`names`, by gallery camera ID) in the Home Assistant store and come back as
+`Camera::label`; **Reset name** removes one. Each frame is fetched off the SDL
+thread: `State::camera_watches` lists what is on screen (nothing unless the gallery is open and
+Luma visible), and `cameras::Service::sync` keeps one worker thread per watched camera, keeping a
+worker (and its connected stream) that is watched the same way and only giving it new URLs.
+Grid tiles poll snapshots every 2 s (4 s above nine cameras); an enlarged camera reads the
+motion-JPEG stream with `cameras::Parts`, which splits parts by Content-Length or JPEG markers
+and skips to the newest buffered frame. A stream that fails, ends or sends nothing for 5 s
+(ureq's per-read timeout) switches to back-to-back snapshots, at most four a second, and a
+**Live** or **Snapshots** badge says which is showing. Frames are decoded (at most two at once)
+and shrunk to their drawn size on the worker, then drawn with `Draw::Camera`, which keeps one
+GPU texture per camera, re-uploaded only for a newer frame; damage tracking compares frames by
+pointer, so a new frame redraws only its tile. The main loop wakes every 16 ms while the gallery
+is open.
+
+Opening is kept short in three ways. Snapshot addresses on Home Assistant's camera proxy get
+`&width=&height=` of the size they are drawn at (`cameras::sized`: the tile's size in the grid,
+1920×1080 enlarged), and the proxy scales the JPEG down to the nearest size it can at or above
+that, so a tile loads and decodes a fraction of the camera's full picture. Closing the gallery
+keeps its tile pictures (not an enlarged camera's full-size frame): the next visit shows them at
+once, dimmed, until each camera's first new picture (`Gallery::fresh` is the frame serial that
+visit began at). And the main loop wakes every 4 ms for 300 ms after asking the Home Assistant
+thread for the cameras, instead of waiting out an idle screen's 100 ms. The log (area `cameras`)
+says how long the first picture and all of them took after opening.
+
+The enlarged camera can be rewound. Its worker (`Watch::record`) keeps every frame as the camera
+sent it, undecoded, for `cameras::REWIND` (two minutes, at most 48 MB) in the service's
+`Recording`; it is dropped once no camera is enlarged. A camera Home Assistant's UniFi Protect
+integration records arrives with `history_url` (`Camera::history`) and reaches `HISTORY` (24 h)
+back. `Playback::Replay { lag, since, speed }` is the position: `lag` behind live at `since`,
+moving at `speed` (0 paused, 1 normal, ±2…64 from the media keys, `Gallery::faster`). Left/Right
+(`Gallery::skip`) step 10 s, growing while held (`step`: a minute after 1 s, five after 3 s, half
+an hour after 6 s; presses within `HOLD_GAP` continue a hold); OK pauses and plays; Up/Down
+(`Gallery::jump`) go to 2 s before the previous or next `Mark`. Fast-forward stops at live and
+rewind at the oldest moment. Each tick `State::camera_replay` hands the main loop a `Want`: a kept
+frame (`Want::Kept`) within the kept span, else Protect's picture (`Want::Recorded`,
+`history_url&at=<unix>&width=1280`). One replay thread loads it, newest ask first and not again
+for the same frame, as `Update::Replay` under its own texture key; `None` means nothing was
+recorded then (**Nothing recorded at this time**). Every `EVENTS_REFRESH` the gallery asks
+`history_url&events=1&start=&end=` for the last day's marks (`Update::Marks`), drawn on the bar
+by kind. Playing at normal speed in the recordings, once scrubbing has settled for `SETTLE`,
+hands over to the overlay app (`Video::Recorded`, `VideoRequest::recorded`), which plays Protect's
+MP4 a piece at a time (60 s, then 300 s) from `GET /api/overlay/recorded`: loopback only, checked
+against the session's nonce, it redirects to `history_url&start=&end=` with the camera's current
+token. Any timeline key there closes it with `key`, `behind` (seconds behind live) and `paused`
+in its `closed` report (`cameras::Closed`), and the gallery carries on from that moment with the
+key; a video that fails puts the camera in `recorded_failed`, which replays pictures instead.
+The live HLS video hands over the same way: Left past what it kept, or Up (back to live when no
+mark is earlier), when the camera has history (`VideoRequest::history`). While recorded video
+plays, no pictures load behind it; a camera without history paused past its oldest kept frame
+keeps the picture it has. Leaving live closes nothing; going live again asks for the
+HLS video again.
+
+The integration's `HistoryView` (`/api/luma/history/<entity>`) checks the camera's access token
+like `StreamView`, finds the camera's UniFi Protect config entry in the entity registry, and
+redirects `at` and `start`/`end` (at most 15 minutes, within 31 days) to the UniFi Protect
+integration's snapshot and video views with a path `async_sign_path` signs for a minute as Home
+Assistant's content user, passing the camera's entity ID (those views look a camera up by Protect
+ID, then entity ID). `events` answers from the Recorder's history of the camera device's Protect
+motion and detection binary sensors and doorbell event entity (`event_spans`), told apart by each
+entity's own key (its unique ID after the MAC address), never by entity IDs that carry the device
+name.
+
+**The camera's own video on the TV's decoder.** Where the TV has LG's direct media decoder
+(`libNDL_directmedia`, webOS 5 and later, loaded with `dlopen` so Luma starts without it) and the
+camera has a `live_url`, an enlarged camera with **Live video** on skips HLS and the overlay app.
+The integration's `LiveView` (`/api/luma/live/<entity>?token=<camera token>`, checked like
+`StreamView`) answers from a relay (`custom_components/luma/relay.py`): one thread per camera
+reads the source Home Assistant's stream integration would read, with PyAV and the same options
+(`tls_verify` off unless the camera asks, since recorders use self-signed certificates), never
+decoding. The event loop keeps the frames since the last keyframe (at most 48 MB) and hands each
+listener that stretch flagged as earlier, then every frame as it arrives; a listener 240 frames
+behind skips to the next keyframe. The body is `LUMAVID1`, a length-prefixed JSON header (`codec`
+`h264` or `hevc`, `width`, `height`), then frames of `u32 length, u8 flags, i64 pts` (microseconds)
+and Annex B bytes with parameter sets before each keyframe. `&warm=1` only starts the relay, which
+stops by itself two minutes after its last listener. While the gallery is open,
+`State::camera_relays` asks it for every camera on screen that UniFi Protect records, at once and
+every 90 s (and when the grid scrolls), so whichever camera is enlarged is already being read;
+other cameras, which may run on a battery, are asked by `State::camera_warm` only once focus
+rests on them, instead of the HLS endpoint. On a TV, UniFi Protect cameras sent a keyframe every 5 s: a
+relay already reading delivered its first frame in 25-49 ms, one that had to connect in 1-2 s.
+
+`src/live.rs` reads that stream on a `camera-live` thread and feeds `NDL_DirectVideoPlay`. The
+decoder is initialised, loaded and unloaded on the SDL thread (`Live::poll`, `Drop`), because the
+library looks up the current GL window to export it; in a test app on a webOS 11.2 TV, loading took
+about 130 ms and frames showed as fast as they were fed, at twice real time without queueing.
+`cameras::Native` is `Starting` until three frames are fed, then `Showing`: `Gallery::see_through`
+makes the scene drop its wallpaper, backdrop and picture and the renderer clear to transparent
+(`Renderer::see_through`), so the video plane behind Luma's window shows with the controls over
+it. Pausing or scrubbing ends the decoder's video and the gallery's own pictures take over; going
+live starts it again. A relay or decoder failure puts the camera in `native_failed`, which plays
+HLS in the overlay app as before. The motion-JPEG worker keeps running underneath, for the frames
+the gallery rewinds through. There is no sound yet. On an OLED G4 (webOS 11.2) with Luma as Home,
+three UniFi Protect cameras played smoothly with the controls drawn over them; the decoder loaded
+in 459 ms the first time and about 75 ms after that, and what remained of the wait was the relay
+connecting to a camera it was not yet reading (1-2 s), which starting relays at opening removes.
+
+Home Assistant's `camera_proxy_stream` is built from snapshots for most camera integrations
+(`Camera.frame_interval` defaults to 0.5 s, so about two frames a second). For real video the
+integration adds `hls_url` to every camera with the stream feature while the `stream`
+integration is loaded: `/api/luma/stream/<entity>?token=<camera token>` (`StreamView`, which
+checks the camera's access tokens like Home Assistant's camera proxy) starts Home Assistant's
+HLS stream and answers `{"url": "/api/hls/<stream token>/master_playlist.m3u8"}`. Enlarging a
+camera with **Live video** on sets `cameras::Video::Resolving`; `cameras::Service::resolve` asks
+that endpoint off the SDL thread, and the answer makes the Home Assistant thread launch the
+overlay app with `mode: "video"` (`Api::show_video`); the motion-JPEG worker keeps running
+underneath. Home Assistant answers the master playlist only once a stream has its second
+segment, so a stream started by OK cannot show video before Home Assistant has connected to the
+camera and cut one whole segment (`stream:` `segment_duration`, 6 s by default, then the next
+keyframe). So the stream is started ahead: once focus has rested 400 ms on a camera with **Live
+video** on, `State::camera_warm` hands the main loop its endpoint and `cameras::Service::warm`
+asks it, discarding the answer (the address is asked for again on OK, which is quick once the
+stream runs). Home Assistant stops a stream nobody loads about a minute after it starts, so
+focus that stays asks again every 70 s, for five minutes. Only the focused camera is started,
+since starting a stream wakes a battery camera. The log says how long each stage took: the
+`cameras` area logs the stream started ahead, the stream address and the first live motion-JPEG
+frame after enlarging; the page reports its first frames to `POST /api/overlay/playing` (loopback,
+session and nonce like `closed`), and the `overlay` area logs the time since Luma asked for the
+video and how much of it passed in the page. `luma.dismiss` (`DELETE /api/overlay`) closes only a doorbell card, never a camera video.
+The page plays the playlist with the bundled hls.js light build (1.5.20, ES5, Apache-2.0,
+`overlay/vendor/`) through Media Source Extensions: it reads Home Assistant's low-latency HLS
+parts (about 1 s) instead of waiting for whole segments (about 6 s), so the video starts in a
+couple of seconds and stays close to live. The TV's own HLS player is the fallback; it
+started after about 12 s on a TV. HLS views allow any origin, so the `file://` page may fetch
+them. webOS shows hardware video on a plane behind the page, black until the first frame
+decodes, so the page covers it with the camera's snapshots (the `snapshot` parameter,
+refreshed back to back) and uncovers it once playback has advanced 0.3 s. hls.js keeps two minutes
+behind the playhead and keeps loading while paused or behind (Home Assistant's playlist lists only
+the newest few seconds), so Left/Right (and rewind/fast-forward) scrub through what the TV has
+buffered and OK (and play/pause) pauses and plays, with the same bar as Luma's; a user pause is not
+a stall. Back closes it (OK too, before it plays)
+and reports closing, which also leaves the enlarged camera (`Event::VideoClosed`); a stream that
+fails, or shows nothing within 15 s, reports `failed`, and that camera stays on the motion-JPEG
+stream for the rest of the visit. A doorbell card replaces the video; leaving the camera in Luma
+closes it (`Service::close_video`).
+
+A doorbell card can play HLS too. `luma.show_camera` with a camera entity (`mode: video`, the default)
+starts the stream in Home Assistant (`card_hls_url`, the same `async_request_stream` as
+`StreamView`) and adds the absolute playlist URL as `hls_url`; a camera that cannot stream just
+leaves it out. `POST /api/overlay` validates it like the other camera URLs and passes it to the
+page as `hls`, still requiring `stream_url` or `snapshot_url` as the card's picture. The page
+plays both through `playHls` (the card: native HLS, then hls.js; the Cameras video: hls.js first; 15 s to show a frame; an `ended` video or
+one whose `currentTime` stands still for 10 s fails too): the card's muted `<video>` stays
+invisible over the motion-JPEG until it plays, then covers it. The motion-JPEG stays connected
+underneath, because its camera token may have rotated by the time a long card's video fails, so a
+failed video just uncovers it. Home Assistant gives the stream 5 s to start, and any failure there
+sends the card without `hls_url`. Older Luma builds ignore `hls_url`.
+
+Holding OK (or a long pointer press, or Menu) on a tile opens **Move** (arrows move it, OK or Back
+ends), **Hide camera** and **Camera settings**; the settings button at the top right, reached
+with Up from the first row, opens the same settings: **Live video** (off makes enlarged cameras
+poll snapshots) and a shown/hidden toggle for every camera. Each change goes to the service's
+thread (`Service::arrange`), which stores it in `Store::gallery` by gallery camera ID (the
+server's pairing position and entity ID, so two servers' `camera.door` stay separate; unpairing
+a server drops its entries and renumbers later servers', and turning the setting off clears it), keeping
+entries for every camera the gallery did not report; new cameras follow in Home Assistant's
+order, and one arriving while the gallery is open goes after its neighbour in that order. Back ends moving,
+closes a sheet or the enlarged camera, then the gallery; Home also closes it.
 
 Rust tests drive the API without sockets through a recording `Tv` (pairing, lockout, validation,
 pause/resume, timeouts, persistence) plus one loopback HTTP round trip; helper tests use the
@@ -430,6 +657,30 @@ python -m pip install pytest-homeassistant-custom-component==0.13.316 ruff==0.17
 ruff check . && ruff format --check .
 python -m pytest -p no:cacheprovider tests/home-assistant
 ```
+
+**What the TV reports.** `src/telemetry.rs` keeps Luma's log in memory: the last 500 entries, plus
+the last 120 performance summaries in a separate list so summaries never push failures out.
+Write diagnostics with `telemetry::log_info!`, `log_warn!` or `log_error!(area, format…)` rather
+than `eprintln!`. They still print `Luma {area}: …` to stderr. Entry numbers start at 1 on each
+run, which gets a random `boot` ID, so `boot:seq` is a cursor. `telemetry::frame` counts
+presented frames on the SDL thread: the CPU time to compose, render and swap, and as dropped
+any interval from 25 ms to 250 ms (longer gaps are idle). A `telemetry` thread records a summary
+each minute while frames were presented, every ten minutes otherwise, with resident memory and
+CPU from `/proc/self`. A panic hook records panics and writes `luma-panic.txt` beside the
+preferences; the next start reports and deletes it.
+
+`GET /api/events` is the one endpoint that does not answer and close: `serve` hands the
+connection to `telemetry::stream`, which writes server-sent events on its own thread (at most
+eight). It sends what was kept after the `after` cursor (all of it when `boot` differs), then
+waits on a condition variable for new entries, with a comment line every 15 seconds. Each stream
+ends when its server unpairs, Home Assistant is turned off in Luma, or the same server connects
+again (`Api::streams`). In Home Assistant, `custom_components/luma/events.py` keeps the stream
+open per config entry, reconnecting with backoff from 5 seconds to 5 minutes. It logs entries
+under `custom_components.luma.tv`, fires `luma_event`, feeds `sensor.py` and stores its cursor,
+the last 1,000 entries and 720 summaries in `.storage/luma.events.<entry_id>`.
+`diagnostics.py` adds those and `GET /api/diagnostics` to the diagnostics download. The tests
+turn the stream off by default (`silent_tv_events` in `tests/home-assistant/conftest.py`): a
+background task that never ends would hang `async_block_till_done(wait_background_tasks=True)`.
 
 Turning the setting on opens a dialog (`Overlay::HomeAssistantSetup`) with a QR code for
 `HACS_LINK`, a My Home Assistant redirect that opens HACS on the owner's server with this
@@ -655,6 +906,10 @@ for Luma; bypassing the browser does not by itself reconfigure LG's graphics out
 `--profile-frames N` forces redraws and measures swap-to-swap intervals after ten warmup
 presentations. Hidden windows pause profiling. Capture stalls are excluded. CPU submission is
 not a GPU timestamp, and `--frames` counts event-loop iterations, not presentation rate.
+With `--frames`, animations run on a fixed 1/60 s step per event-loop iteration instead of wall
+time (`src/clock.rs`), so a smoke budget covers the same animation on any runner. Without VSync
+(Xvfb, llvmpipe) the loop free-runs while animating, and a faster machine would otherwise spend
+the budget before a transition finishes. `--profile-frames` keeps wall time.
 Inspect `window`, `drawable`, `drawable_is_4k`, `last_presented`, `capture` and `profile` in JSON.
 Do not infer 60 fps from a successful VSync request; measure actual TV pacing and transitions.
 `LUMA_PROFILE_SKIP=wallpaper,image,app,shape,gradient,shadow,text` (or `all`) leaves those draws
@@ -760,6 +1015,22 @@ can still appear. This integration does not change those settings or install a r
 instance and removes the boot hook. The copied restore scripts remain in `/var/lib/luma-home`
 even if the installed package is removed. Disable the standalone `65-luma` cold-boot hook before
 enabling this integration.
+
+Apps always lists a built-in **LG Home** tile (`luma.lg-home`). Without the integration it simply
+launches `com.webos.app.home`. While Luma is Home, it runs the installed `home.sh suspend` in its
+own systemd unit through Homebrew Channel's exec: that removes the mount like `disable`, stops
+Luma's Home and opens LG's, but leaves the integration enabled and the boot hook in place. The
+Home key then opens LG Home until the next cold boot (standby with Quick Start+ is not one), when
+`64-luma-home` applies the takeover again. Run `home.sh apply` to bring Luma back sooner.
+
+`suspend` also writes `/var/run/luma-home-suspended`, which a tile's jail can read and boot
+clears. Settings › System › **Make this the default Home app** (`luma_home`, on by default) makes a normal Luma
+start that finds this marker run `home.sh resume` the same way: it closes the normal instance and
+applies the takeover again, opening Luma as Home. Turning the setting on does the same at once.
+`resume` does nothing without the marker and removes it before trying, so it tries once per
+suspension; it checks what `apply` needs (Luma installed, no other mount over LG Home) before
+closing the open instance; `apply`, `disable` and `restore` remove it, so a
+disabled integration is never taken back.
 
 Build and script checks cannot establish native Home compatibility. Manually verify Home, Back
 out of the last app, standby wake with the TV's chosen Quick Start+ setting, a full cold boot,
@@ -873,7 +1144,7 @@ pnpm dev --test-extra-apps 120
 On the TV, add `--test-extra-apps 120` after the JSON argument in the jailed command above.
 This explicitly appends up to 300 labeled non-launchable cards to a successful real inventory,
 using its apps as artwork/category templates. It uses `scroll-preview-preferences.json`,
-initialized from normal choices once. Favoriting test cards exercises long Home strips without
+initialized from normal choices once. Favoriting test cards exercises long Home grids without
 changing normal favorites. Ctrl+C then a normal launch restores real inventory/preferences.
 The placeholder cards are never a fallback for an inventory failure.
 
@@ -908,6 +1179,38 @@ Fresh Celsius readings are reused for 15 minutes; valid saved data lasts up to s
 failure retries after five minutes. Unit changes convert unrounded cached Celsius immediately.
 Removing a city clears its cache. The `.weather.json` sidecar uses Unix-seconds timestamps.
 Mock servers accept only literal loopback HTTP origins and are refused in TV builds.
+
+Search goals, example queries and known gaps are in [search.md](search.md).
+
+The Search tab (tab index 3, `state::SEARCH_TAB`, drawn left of Home so the other tabs keep their
+indices) turns into the search field and opens the keyboard (`TextField::Titles`). Its search
+follows `title_query` once a Movie of the Night key is stored. The selected result is shown at
+the top in four short lines, so two rows of posters fit below, with its US rating from TMDB
+details fetched with `release_dates` or `content_ratings` appended (MDBList's certifications are
+not reliably American).
+`streaming::Incremental` waits for three characters and a 350 ms pause, answers repeats from
+memory and drops replies for text that has since changed. `streaming_search::Service` runs each
+search on its own worker thread, reading `streaming-keys.json` per search so new keys apply at
+once, and caches every API reply under `streaming-cache/` beside the preferences. The API
+clients, and so their open connections, are kept until the keys change, and opening the Search
+tab connects to both services without credentials (`Http::warm`, no quota) so the first search
+does not wait for TLS. A search asks TMDB first (free): text that ends mid-word and can only
+become one word is completed (`relevance::complete`) and searched as that word, so the
+keystrokes that follow reuse one Movie of the Night reply. Details are fetched six at a time,
+and a search the user has typed past gives up between steps. OK launches the
+picked app with `deeplink` parameters through `com.webos.applicationManager/launch`. Every
+poster says whether that costs money (`view::cost_badge`: a check when included, else "$");
+the app is named for the selected title. Every installed app counts as subscribed. Posters come
+from the signed `cdn.movieofthenight.com` links in each result (no other host is fetched): three
+`posters` workers fetch them with the weather rules (timeout, no redirects or proxy, 1 MiB limit),
+keep the JPEG under `streaming-posters/` (48 MiB cap) keyed by the link without its signature,
+and decode it to card size. The renderer uploads each like a camera frame; State keeps decoded
+posters only for the current results. With an MDBList key, `mdblist` fetches review scores for
+a whole search in one `POST /imdb/any` batch by IMDb ID (one request of the free 1,000 a day),
+caches each title's scores for a week in `streaming-cache/`, and scrubs the key (a query
+parameter) from any error text. Captured replies are in `tests/fixtures/mdblist`. Scripted
+captures can wait with `await-titles`. Pre-filling `streaming-cache/` from
+`tests/fixtures/streaming` with a placeholder key renders results without network access.
 
 `assets/messages.json` supplies Dutch, English, French, German, Italian, Polish, Portuguese (Brazil),
 Russian, Simplified Chinese, Spanish, Swedish, Traditional Chinese and Vietnamese, including locale formatting
@@ -994,8 +1297,8 @@ pinned Linux SDK, inspects/normalizes the actual IPK and generates checksums/fee
 **Rust checks, rendering, and native package** check remains as an aggregate that requires every
 preparation, smoke and package job to succeed. It uploads release/rendering artifacts on PRs,
 manual runs and Release runs. CI does not run again after a merge: PRs are the gate. `pnpm check` also validates synchronized release versions,
-and `pnpm test:release` covers version synchronization, the R2 feed mirror and the real
-Changesets version command in an isolated fixture. Host CI cannot prove hardware compatibility,
+and `pnpm test:release` covers version synchronization, the minor/major release bump and the R2
+feed mirror in an isolated fixture. Host CI cannot prove hardware compatibility,
 small-text quality or presentation frame rate.
 
 ### PR test IPKs
@@ -1021,27 +1324,10 @@ run independently.
 
 ## Releases
 
-Add a changeset to feature/fix PRs that should be included in the next app release:
-
-```sh
-pnpm changeset
-```
-
-Select `lg-luma`, choose patch/minor/major and describe the change. Commit the generated file
-under `.changeset/` with the PR. Documentation-only and maintenance PRs that do not need a release
-can omit it. Keep the existing app version in ordinary PRs.
-
-`.github/workflows/changeset-status.yml` adds a Changesets status check and maintains one comment
-per PR, including fork PRs. It reports the requested release types or notes that a PR without a
-changeset will not request an app version bump. For code or behavior changes, add a changeset
-using semantic versioning: **patch** for backward-compatible fixes, **minor** for backward-compatible
-features, or **major** for breaking changes. The comment is informational, so documentation-only
-and maintenance PRs can still merge without a release changeset. It updates when a PR is opened,
-reopened, edited, marked ready or receives new commits. The workflow becomes active once it is merged into the PR's base branch. It uses
-`pull_request_target` with a read-only status job and a separate comment-writing job, without
-installing dependencies or running code from the PR.
-
-Merging never publishes. Changesets wait in `.changeset/` until the next release.
+Pull requests need no release bookkeeping: keep the existing app version and don't add version
+or changelog files. Merging never publishes. The **Release** workflow picks the version, and
+each GitHub release's notes are generated from the pull requests merged since the previous release
+(see [Release notes](#release-notes)), so a clear PR title and description are what end up in them.
 
 ### Merge gate
 
@@ -1065,21 +1351,20 @@ accepts it. Any other push to `main` without that passing check is rejected.
 
 Run **Actions → Release → Run workflow** on `main` (`.github/workflows/release.yml`) and choose:
 
-- **bump**: `patch`, `minor` or `major` adds that bump (with the optional **notes** line as its
-  changelog entry) on top of any pending changesets; Changesets uses the highest requested bump.
-  `changesets` releases only the pending notes and fails if there are none.
+- **bump**: `auto` (the default) releases the next minor version, for example 2.19.0 → 2.20.0.
+  `major` releases the next major version, for example 2.19.0 → 3.0.0.
 
 The workflow then:
 
-1. **Bump version.** `pnpm version:release` consumes the changesets, updates `package.json` and
-   `CHANGELOG.md`, and synchronizes `appinfo.json`, the root `Cargo.toml`, the `luma` entry in
-   `Cargo.lock` and the versioned IPK examples in `readme.md`. The result is committed as
-   `Release vX.Y.Z` on a temporary `release/vX.Y.Z` branch. An existing tag stops the run.
+1. **Bump version.** `pnpm version:bump minor|major` updates `package.json` and synchronizes
+   `appinfo.json`, the root `Cargo.toml`, the `luma` entry in `Cargo.lock` and the versioned IPK
+   examples in `readme.md`. The result is committed as `Release vX.Y.Z` on a temporary
+   `release/vX.Y.Z` branch. An existing tag stops the run.
 2. **Validate.** Calls `ci.yml` on that commit: checks, unit tests, the four desktop smoke suites and
    the verified ARM IPK and Homebrew feed.
-3. **Publish GitHub release.** Fast-forwards `main` to the release commit (refusing if `main` moved
-   meanwhile), creates the `vX.Y.Z` GitHub release from that run's artifacts and deletes the
-   temporary branch.
+3. **Publish GitHub release.** Writes the [release notes](#release-notes), fast-forwards `main` to
+   the release commit (refusing if `main` moved meanwhile), creates the `vX.Y.Z` GitHub release from
+   that run's artifacts and deletes the temporary branch.
 4. **Publish to Cloudflare R2.** See [Release hosting](#release-hosting-cloudflare-r2).
 
 If bumping or validation fails, `main`, tags and the published feed are untouched: fix the problem
@@ -1088,8 +1373,52 @@ manually with the tag. `ci.yml` on its own (PRs, manual dispatch) only validates
 No additional token is needed; the built-in token pushes the release commit.
 
 `pnpm version:check` checks synchronization without writing files. `pnpm version:sync` repairs
-metadata from the current `package.json` version without calculating a bump. `pnpm version:release`
-is reserved for the Release workflow.
+metadata from the current `package.json` version without calculating a bump. `pnpm version:bump`
+is reserved for the Release workflow, and `node tools/sync-version.mjs --set X.Y.Z` for the Nightly
+workflow.
+
+### Release notes
+
+`tools/release-notes.mjs` writes the notes for releases and nightlies. It asks GitHub for the list
+of pull requests merged since the previous stable release and puts a **What's new** section above
+that list. Each pull request is grouped by the files it changed:
+
+- **On the TV**: the app (`src/`, `tv/`, `tv-helper/src/`, `assets/`, `overlay/`,
+  `vector-geometry/`, `appinfo.json`; test files don't count).
+- **Home Assistant**: `custom_components/`, `hacs.json`.
+- **Behind the scenes**: everything else (CI, tooling, tests, docs), title only.
+
+The first two carry the pull request's own summary: the first paragraph, or the top-level bullets
+(at most six), of the description's `## Summary` section, or of the text before its first heading.
+Wrapped bullet lines are kept, nested bullets dropped, and any paragraph or bullet longer than
+500 characters is cut at a word. If the notes would go over GitHub's 125,000-character limit, the
+summaries are left out (titles only). So the PR title and summary are what users read; write
+them for someone holding the remote. No
+external service or secret is involved; a GitHub API failure stops the run before anything is
+published.
+
+### Nightly builds
+
+**Actions → Nightly** (`.github/workflows/nightly.yml`) runs every day at 09:37 UTC, and can be run
+by hand on `main`. It builds only when `main` has commits since the last release and there is no
+nightly for them yet; otherwise it stops after a few seconds.
+
+A nightly is versioned `X.Y.N`: `X.Y.0` is the last release (the version in `main`'s
+`package.json`) and `N` is the number of commits on `main` since it. Releases are always `X.Y.0`,
+so a nightly sorts after the release it builds on and before the next one; a TV on a nightly
+upgrades to the next release like any other. The workflow:
+
+1. Commits the nightly version on a temporary `nightly/vX.Y.N` branch (`main` is never changed).
+2. Runs the full `ci.yml` validation on that commit, like a release.
+3. Publishes a `vX.Y.N` GitHub **prerelease** titled "Luma X.Y.N (nightly)", with release notes
+   covering everything since the last release, then deletes all but the newest five nightly
+   prereleases and their tags.
+4. Mirrors it to R2 and updates `https://luma.elischleifer.com/nightly/repo.json`, deleting the R2
+   folders of pruned nightlies. The stable `/repo.json` is never touched.
+
+To follow nightlies on a TV, add `https://luma.elischleifer.com/nightly/repo.json` as a repository
+in Homebrew Channel. Luma's own updater keeps reading the stable feed, so it offers the next release
+and never a nightly. A failed nightly changes nothing; the next night retries if `main` hasn't moved.
 
 Homebrew Channel's details page reads `packages[].shortDescription` (or `fullDescriptionUrl`),
 not `manifest.appDescription`. The feed generator writes the root app metadata description into
@@ -1179,9 +1508,16 @@ Bucket layout:
 
 ```text
 repo.json                  latest feed, asset URLs rewritten to luma.elischleifer.com (60 s cache)
+nightly/repo.json          latest nightly feed (60 s cache)
 releases/vX.Y.Z/*.ipk      immutable release assets, sha256sums, description, icon
 releases/vX.Y.Z/repo.json  that release's mirrored feed
 ```
+
+Nightlies (`vX.Y.N`, `N > 0`) use the same `releases/` folders. When the nightly workflow mirrors
+with `channel: nightly`, it updates `nightly/repo.json` instead of the root feed (only for the
+newest nightly prerelease, so re-mirroring an older one never rolls TVs back), and deletes any
+patch-version folder that is no longer a GitHub release, which removes pruned nightlies but never
+a stable release.
 
 After the Release workflow publishes a GitHub release, its `mirror` job calls
 `.github/workflows/publish-r2.yml`. It downloads the release assets, verifies `sha256sums`, rewrites

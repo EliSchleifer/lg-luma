@@ -28,22 +28,26 @@ builds or tests.
 desktop OpenGL and mock weather HTTP. Linux can use `xvfb-run -a pnpm test:smoke`. Tests must not
 contact real weather APIs or a TV. Respect any user instruction to use manual TV verification
 instead of running automated tests. Builds/lint may still be run. Do not claim hardware behavior
-from desktop checks. Add a `pnpm changeset` file for release-worthy changes and leave version
-bumps to the manual Release workflow. Its `pnpm version:release` command synchronizes
-`package.json`, `appinfo.json`, the root `Cargo.toml`, the `luma` entry in `Cargo.lock` and README
-IPK examples. Supporting Rust crates retain independent versions. `pnpm version:check` checks
-consistency without writing files. Code or behavior changes should use semantic versioning:
-patch for backward-compatible fixes, minor for backward-compatible features, and major for
-breaking changes. Translation updates and additional UI languages, including required font glyph
-coverage, are patch changes. Documentation-only or maintenance changes that do not need a release
-can omit a changeset.
+from desktop checks. Home Assistant compatibility uses API levels, not release versions: raise
+`API_VERSION` or `MIN_INTEGRATION` in `src/home_assistant.rs`, or `INTEGRATION_API` or
+`MIN_TV_API` in `custom_components/luma/const.py`, only when the other side cannot work without
+the change. A raised minimum makes Home Assistant Repairs (and Luma's Settings) ask the owner to
+update. Leave version bumps to the manual Release workflow,
+which releases the next minor version by default or a major version when chosen. Its
+`pnpm version:bump` command synchronizes `package.json`, `appinfo.json`, the root `Cargo.toml`,
+the `luma` entry in `Cargo.lock`, README IPK examples and the Home Assistant integration's
+`custom_components/luma/manifest.json`. Supporting Rust crates retain
+independent versions. `pnpm version:check` checks consistency without writing files. PRs need no
+changelog or version files: release notes are generated from merged pull requests.
 
 ## Build and identity
 
 `com.ecklf.luma` is the native app's ID and `luma` its executable. Root `appinfo.json` is the
 package metadata source. It installs separately from the former web app `com.luma.launcher` and
 prototypes `com.luma.launcher.native` and `com.luma.native`, all excluded from app inventory. Preferences are local JSON
-per installation; browser local storage and preferences from other IDs are not migrated.
+per installation; browser local storage and preferences from other IDs are not migrated. Unknown
+keys in `preferences.json` and `home-assistant.json` (from a newer build) are kept on save; when
+removing a preference field, add its key to `RETIRED_SETTINGS` in `src/model.rs` so it is dropped.
 
 ARM builds must use the NDK's gnueabi soft-float calling convention and explicit sysroot, with
 isolated pkg-config. Preserve the Cortex-A9/VFP Rust flags and `getauxval` compatibility.
@@ -53,13 +57,15 @@ packages use `Architecture: arm`, preserve executable mode and include licenses/
 
 ## Runtime constraints
 
+Log diagnostics with `telemetry::log_info!`/`log_warn!`/`log_error!(area, …)`, not `eprintln!`:
+they reach paired Home Assistant servers as well as stderr (see `src/telemetry.rs`).
 Keep input/rendering on the SDL thread and TV/HTTP work off it. Luna requests originate from the
 native process, not `luna-send-pub -a` impersonation. Inventory failure must never substitute demo
 data on TV. Explicit `--test-extra-apps` is a labeled manual preview applied only after successful
 inventory reads, with separate preferences and no placeholder launch requests.
 
-Pointer hover/down must not move a clicked control. Home favorites use one horizontal strip;
-remote focus/reordering reveals the whole selected card. Apps Up/Down follows six-column grid
+Pointer hover/down must not move a clicked control. Home favorites fill a six-column grid
+that wraps onto further rows; launching a favorite moves it to the front (most recently used first). Apps Up/Down follows six-column grid
 indices, including offscreen rows, so headers cannot steal mid-grid navigation. Back restores
 setting subpage parents and supports SDL-webOS Back. OK finishes move mode without launching.
 
@@ -67,12 +73,88 @@ Vector icon/logo assets are standalone SVGs compiled to `.lvec` at build time. F
 are tessellated only as needed; text runs use bounded GPU caches, lazy CJK and no glyph bitmap
 atlas. Text AA prefers MSAA of intact outlines, with a narrow fringe fallback; keep physical
 origin/baseline snapping and logical 1920×1080 layout. `--resolution 4k` is experimental, not a
-shipping-default claim. Profiles count presentations; ordinary `--frames` is event-loop iterations.
+shipping-default claim. Profiles count presentations; ordinary `--frames` is event-loop iterations,
+each a fixed 1/60 s of animation time.
 
 Weather uses ureq/rustls, fixed Open-Meteo origins, bounded replies/timeouts, no proxy/redirects,
 separate workers/cache and generation IDs. Cache Celsius and convert units without replacing it.
 Only configured/enabled/visible Home starts forecasts. Shared translations are bundled locally.
 Match the current native design without on-screen weather credits; attribution remains in docs.
+
+## Reaching the development TV
+
+The maintainer's rooted TV (SSH server: Homebrew Channel's Dropbear) is reachable for root SSH
+through a Cloudflare Access tunnel at `tv.elischleifer.com`. The maintainer wants agents to be able
+to use it for testing on the TV. From a cloud session:
+
+1. **Preferred, when `LUMA_DEV_TOKEN` is set:** install the SSH client
+   (`apt-get update && apt-get install -y openssh-client`), then run
+   `node tools/tv-access.mjs request --reason "<what you will test>"`. It asks Home Assistant
+   (`ha.elischleifer.com`; Luma's developer access, see `home-assistant.md#developer-access`),
+   which asks the maintainer to approve on their phone; tell the maintainer you are waiting. On
+   approval it sets up `ssh tv` with a key valid for
+   up to 8 hours, the Cloudflare service token, and streaming search keys in `.env`. Run
+   `node tools/tv-access.mjs check` to confirm, and `node tools/tv-access.mjs release` when done
+   with the TV. Never print the key or tokens, and never copy them anywhere else.
+2. **Fallback, otherwise:** install `openssh-client` and `cloudflared` (the official linux-amd64
+   release binary).
+   - SSH key: if `TV_SSH_PRIVATE_KEY` is set (the key itself, or its base64), write it to
+     `~/.ssh/id_ed25519` with mode 600; its public key is already in the TV's
+     `/home/root/.ssh/authorized_keys`. Otherwise generate a key and ask the maintainer to append
+     the public key there.
+   - Cloudflare Access: if `TUNNEL_SERVICE_TOKEN_ID` and `TUNNEL_SERVICE_TOKEN_SECRET` are set,
+     `cloudflared access ssh` uses that service token and no login is needed. Otherwise run
+     `cloudflared access login https://tv.elischleifer.com` and give the maintainer the printed
+     URL to approve; leave it running until it prints the token. Never print either token.
+   - `~/.ssh/config`: `Host tv` → `HostName tv.elischleifer.com`, `User root`,
+     `ProxyCommand cloudflared access ssh --hostname %h`.
+
+**Run `luna-send` with `ssh -tt`.** Without a TTY it exits 0, prints nothing and does nothing,
+which looks like a launch the app ignored. Check with
+`ssh -tt tv 'luna-send -n 1 luna://com.webos.applicationManager/getForegroundAppInfo "{}"; exit'`:
+a working call prints a JSON reply.
+
+To learn how the TV itself launches an app with content (deep link formats), capture the Luna bus
+with `ls-monitor` (`/usr/sbin/ls-monitor`) while the maintainer triggers it from LG search or voice,
+and search the capture for `//launch`. Captures include account tokens (Prime Video's OAuth
+refresh token, for one): grep them on the TV, never copy them off, and delete them afterwards.
+An app's `appinfo.json` (`/media/cryptofs/apps/usr/palm/applications/<id>/`) may declare its
+`deeplinkingParams`.
+
+### Debugging a deep link that opens the app's home screen
+
+What worked for Hulu (2026-11), in order:
+
+1. **Reproduce.** Look up the title's link with Movie of the Night (`MOTN_API_KEY`; `motn-key-…`
+   keys go to `api.movieofthenight.com/v4` with `X-API-Key`), build what `src/deeplink.rs` sends,
+   and launch it yourself: close the app first
+   (`luna-send -n 1 luna://com.webos.applicationManager/closeByAppId '{"id":"<app>"}'`), then
+   `…/launch '{"id":"<app>","params":{…}}'`, both under `ssh -tt`.
+2. **See the screen.** `luna-send -n 1 luna://com.webos.service.capture/executeOneShot
+   '{"path":"/tmp/cap.png","method":"DISPLAY","format":"PNG","width":960,"height":540}'`, then
+   `scp tv:/tmp/cap.png` and look at it. Give the app ~15 s to load.
+3. **Press keys.** Apps often stop at a profile picker (Hulu: the first profile is the
+   maintainer's). `tools/tv-keys.py` presses remote keys (`28` is OK). Don't press keys while the
+   maintainer is using the TV, and don't trust screenshots taken then.
+4. **Sniff what LG does.** Start the capture detached so it survives the SSH session:
+   `ssh tv 'nohup timeout 600 /usr/sbin/ls-monitor > /tmp/lsmon.txt 2>&1 < /dev/null &'`. Then ask
+   the maintainer to open any title in that app from LG search or voice. Grep on the TV for
+   `"id":"<app>"` with `//launch` (also `//launchApp`, which shows the final `parameters`). Stop it
+   with `pkill ls-monitor` (not `pkill -f`, which matches and kills your own SSH command) and
+   `rm /tmp/lsmon.txt`.
+5. **Find the ID's source.** LG search's IDs are often the service's internal IDs, not what web
+   links carry. Look for them on the title's public web page (Hulu: the middle number of
+   `EAB::<uuid>::<id>::<asset>`). Encrypted app bundles (an `NCGFILE_HEADER` index.html) can't be
+   read.
+
+Access gotchas: if `tv-access.mjs request` fails with HTTP 502 after approval, check Home
+Assistant's log. "the TV refused the key" means HA's own `luma-dev-manager` line is missing from the
+TV's `authorized_keys`. If the approved route is the TV's LAN address, the integration has no tunnel
+hostname set. Point `Host tv` at `tv.elischleifer.com` with
+`ProxyCommand cloudflared access ssh --hostname %h`, and without a service token run
+`cloudflared access login https://tv.elischleifer.com` in the background and give the maintainer
+its URL. A tunnel answering `websocket: bad handshake` (origin 502) means the TV itself is
+unreachable, often because it's off or asleep.
 
 ## Assets
 
@@ -104,10 +186,9 @@ gallery to `.build/brands-gallery.png`; source restoration via `pnpm assets:bran
 `.github/workflows/ci.yml` is native-only: format/lint/workspace tests, asset generation and
 mocked desktop rendering, SDK setup, ARM cross-build, actual IPK verification/checksum/feed,
 and artifacts. It validates only; `.github/workflows/release.yml` calls it and publishes.
-`.github/workflows/changeset-status.yml` maintains an informational changeset status comment on
-PRs, including forks, with semantic-version guidance for code changes. Its `pull_request_target` jobs must not install dependencies or run code from the PR.
 `.github/workflows/release.yml` (manual dispatch on `main`) is the only publisher: it bumps the
-version on a `release/vX.Y.Z` branch, validates it with `ci.yml`, fast-forwards `main`, creates the
+version (minor by default, or major) on a `release/vX.Y.Z` branch, validates it with `ci.yml`, fast-forwards `main`, creates the
 GitHub release and mirrors it to Cloudflare R2. PRs and merges never publish. See `development.md#releases` for setup and retries.
-Only create commits or PRs when explicitly requested. For PR descriptions follow the global
-`commands/pr.md` format instructions.
+When you finish the initial work for a request, commit it, push the branch and open a pull
+request without waiting to be asked. Later follow-ups on the same request go to that PR's branch.
+For PR descriptions follow the global `commands/pr.md` format instructions.

@@ -16,6 +16,9 @@ mod wallpaper_tests;
 #[path = "input-refresh-tests.rs"]
 mod input_refresh_tests;
 
+#[path = "streaming-ui-tests.rs"]
+mod streaming_ui_tests;
+
 fn ready() -> State {
     let mut state = State::new(Preferences::default());
     state.set_inventory(demo_inventory(), None);
@@ -164,7 +167,11 @@ fn scene(state: &State) -> view::Scene {
         metrics: BTreeMap::new(),
         artwork: crate::app_artwork::Service::new(false),
     };
-    let navigation = view::navigation(&assets, state.preferences.language);
+    let navigation = view::navigation(
+        &assets,
+        state.preferences.language,
+        state.page == crate::state::Page::Search,
+    );
     view::scene_with_pill(
         state,
         &assets,
@@ -178,8 +185,7 @@ fn controls(state: &State) -> Vec<crate::state::Control> {
     scene(state).controls
 }
 
-#[test]
-fn favorites_edge_fragments_share_draw_hit_and_wheel_viewports() {
+fn nine_favorites() -> (State, Vec<String>) {
     let mut state = favorites_only();
     let favorites: Vec<_> = state
         .inventory
@@ -189,29 +195,227 @@ fn favorites_edge_fragments_share_draw_hit_and_wheel_viewports() {
         .map(|app| app.id.clone())
         .collect();
     state.preferences.favorites = Some(favorites.clone());
+    (state, favorites)
+}
+
+#[test]
+fn favorites_fill_six_columns_then_wrap_onto_rows() {
+    let (state, favorites) = nine_favorites();
+    let controls = controls(&state);
+    let rect = |id: &String| {
+        controls
+            .iter()
+            .find(|control| control.target == Target::App(id.clone()))
+            .unwrap()
+            .rect
+    };
+    for column in 1..6 {
+        assert_eq!(rect(&favorites[column]).y, rect(&favorites[0]).y);
+        assert!(rect(&favorites[column]).x > rect(&favorites[column - 1]).x);
+    }
+    // Nothing runs past the sixth column or off the right edge.
+    assert!(rect(&favorites[5]).x + rect(&favorites[5]).w <= 1920.);
+    assert_eq!(rect(&favorites[6]).x, rect(&favorites[0]).x);
+    assert!(rect(&favorites[6]).y > rect(&favorites[0]).y + rect(&favorites[0]).h);
+    assert_eq!(rect(&favorites[8]).y, rect(&favorites[6]).y);
+    assert!(state.hit_test(&controls, 1860., 600.).is_none());
+}
+
+#[test]
+fn home_up_down_follow_the_favorites_grid() {
+    let (mut state, favorites) = nine_favorites();
+    state.focus = Target::App(favorites[1].clone());
+    state.direction(Direction::Down, &controls(&state));
+    assert_eq!(state.focus, Target::App(favorites[7].clone()));
+    state.direction(Direction::Up, &controls(&state));
+    assert_eq!(state.focus, Target::App(favorites[1].clone()));
+    // A short last row takes Down from the columns past its end.
+    state.focus = Target::App(favorites[5].clone());
+    state.direction(Direction::Down, &controls(&state));
+    assert_eq!(state.focus, Target::App(favorites[8].clone()));
+    state.direction(Direction::Down, &controls(&state));
+    assert_eq!(state.focus, Target::App(favorites[8].clone()));
+    state.focus = Target::App(favorites[0].clone());
+    state.direction(Direction::Up, &controls(&state));
+    assert_eq!(state.focus, Target::Nav(0));
+}
+
+#[test]
+fn reordering_moves_a_favorite_between_rows() {
+    let (mut state, favorites) = nine_favorites();
+    state.focus = Target::App(favorites[2].clone());
+    state.hold();
     assert_eq!(
-        state.hit_test(&controls(&state), 1860., 600.),
-        Some(Target::App(favorites[6].clone()))
+        state.direction(Direction::Down, &controls(&state)),
+        vec![Effect::Save]
     );
-    assert!(state.wheel_scroll(&controls(&state), Some((1860., 600.)), 0, -1));
-    assert!((state.home_scroll - crate::state::HOME_TILE_PITCH).abs() < 0.01);
-    assert_eq!(state.scroll, 0.);
+    let order = state.preferences.favorites.clone().unwrap();
+    assert_eq!(order[8], favorites[2]);
+    assert_eq!(order[2], favorites[3]);
+    state.direction(Direction::Up, &controls(&state));
+    assert_eq!(state.preferences.favorites.clone().unwrap(), favorites);
+}
+
+#[test]
+fn launching_a_favorite_moves_it_to_the_front_once_it_opens() {
+    let (mut state, favorites) = nine_favorites();
+    state.focus = Target::App(favorites[4].clone());
+    assert_eq!(state.activate(), vec![Effect::Launch(favorites[4].clone())]);
+    // The platform loop records the request; a failed launch keeps the saved order.
+    state.launching = true;
+    state.launch_requested = Some(favorites[4].clone());
+    assert!(state.launch_response(Err("boom".into())).is_empty());
+    assert!(!state.launching);
+    assert_eq!(state.preferences.favorites.clone().unwrap(), favorites);
+    state.launch_requested = Some(favorites[4].clone());
+    assert_eq!(state.launch_response(Ok(())), vec![Effect::Save]);
+    assert!(state.launch_requested.is_none());
+    let order = state.preferences.favorites.clone().unwrap();
+    assert_eq!(order[0], favorites[4]);
+    assert_eq!(&order[1..5], &favorites[0..4]);
+    assert_eq!(&order[5..], &favorites[5..]);
+    // Already first: nothing to save.
+    state.launch_requested = Some(favorites[4].clone());
+    assert!(state.launch_response(Ok(())).is_empty());
+    // Apps that are not favorites are launched without joining Home.
+    state.preferences.favorites = Some(favorites[..3].to_vec());
+    assert!(!state.mark_used(&favorites[5]));
+    assert_eq!(state.preferences.favorites.clone().unwrap(), favorites[..3]);
+}
+
+#[test]
+fn a_dropped_title_launch_neither_opens_nor_counts_its_app_as_used() {
+    // A title still resolving when a newer launch or GoHome was asked for is dropped.
+    let (mut state, favorites) = nine_favorites();
+    state.launching = true;
+    state.launch_requested = Some(favorites[4].clone());
+    state.launch_dropped();
+    assert!(!state.launching);
+    assert!(state.launch_requested.is_none());
+    assert_eq!(state.preferences.favorites.clone().unwrap(), favorites);
+}
+
+#[test]
+fn reordering_down_into_a_short_last_row_takes_its_last_slot() {
+    let (mut state, favorites) = nine_favorites();
+    state.focus = Target::App(favorites[5].clone());
+    state.hold();
     assert_eq!(
-        state.hit_test(&controls(&state), 40., 600.),
-        Some(Target::App(favorites[0].clone()))
+        state.direction(Direction::Down, &controls(&state)),
+        vec![Effect::Save]
     );
-    let scroll = state.home_scroll;
-    state.pointer_focus(Target::App(favorites[0].clone()));
-    assert_eq!(state.home_scroll, scroll);
-    assert!(state.hit_test(&controls(&state), 4., 600.).is_none());
-    assert!(state.hit_test(&controls(&state), 1915., 600.).is_none());
-    assert!(state.hit_test(&controls(&state), 40., 1060.).is_none());
-    let scene = scene(&state);
-    let viewport = state.favorites_viewport();
-    assert!(scene.draw.iter().any(|draw| matches!(draw, crate::renderer::Draw::Clip(Some(rect)) if rect.x == viewport.x && rect.w == viewport.w)));
-    assert!(state.wheel_scroll(&scene.controls, Some((40., 600.)), 0, 1));
-    assert_eq!(state.home_scroll, 0.);
-    assert_eq!(state.scroll, 0.);
+    assert_eq!(
+        state.preferences.favorites.clone().unwrap()[8],
+        favorites[5]
+    );
+    // Already in the last row: Down stays put.
+    assert!(
+        state
+            .direction(Direction::Down, &controls(&state))
+            .is_empty()
+    );
+}
+
+#[test]
+fn reordering_rows_count_the_input_cards_ahead_of_favorites() {
+    let mut state = ready();
+    let inputs: Vec<_> = state
+        .inventory
+        .inputs
+        .iter()
+        .map(|i| i.id.clone())
+        .collect();
+    for input in &inputs {
+        state
+            .preferences
+            .input_modes
+            .insert(input.clone(), InputMode::On);
+    }
+    let favorites: Vec<_> = state
+        .inventory
+        .apps
+        .iter()
+        .take(8)
+        .map(|app| app.id.clone())
+        .collect();
+    state.preferences.favorites = Some(favorites.clone());
+    let shown = state.apps().len() - favorites.len();
+    assert!(shown > 0 && shown < crate::state::HOME_COLUMNS);
+    let first_in_row_two = crate::state::HOME_COLUMNS - shown;
+    // Up from the second row's first card reaches the first row, above the inputs: it stops
+    // at the first favorite rather than taking an input's place.
+    state.focus = Target::App(favorites[first_in_row_two].clone());
+    state.hold();
+    assert_eq!(
+        state.direction(Direction::Up, &controls(&state)),
+        vec![Effect::Save]
+    );
+    assert_eq!(
+        state.preferences.favorites.clone().unwrap()[0],
+        favorites[first_in_row_two]
+    );
+    // A card on the last row stays put on Down rather than sliding along it.
+    state.moving = None;
+    state.preferences.favorites = Some(favorites.clone());
+    state.focus = Target::App(favorites[first_in_row_two].clone());
+    state.hold();
+    assert!(
+        state
+            .direction(Direction::Down, &controls(&state))
+            .is_empty()
+    );
+    assert_eq!(state.preferences.favorites.clone().unwrap(), favorites);
+    // Down from the first row lands in the same grid column on the row below.
+    state.moving = None;
+    state.focus = Target::App(favorites[0].clone());
+    state.hold();
+    assert_eq!(
+        state.direction(Direction::Down, &controls(&state)),
+        vec![Effect::Save]
+    );
+    let order = state.preferences.favorites.clone().unwrap();
+    assert_eq!(
+        order[(crate::state::HOME_COLUMNS).min(favorites.len() - 1)],
+        favorites[0]
+    );
+}
+
+#[test]
+fn home_rows_fit_long_input_names() {
+    let mut state = ready();
+    state.preferences.show_home_names = true;
+    let input = state.inventory.inputs[0].id.clone();
+    state
+        .preferences
+        .input_modes
+        .insert(input.clone(), InputMode::On);
+    state.preferences.input_names.insert(
+        input.clone(),
+        "A very long custom input name that wraps onto several caption lines, more lines \
+         than any app title in the same row of the Home favorites grid"
+            .into(),
+    );
+    let favorites: Vec<_> = state
+        .inventory
+        .apps
+        .iter()
+        .take(9)
+        .map(|app| app.id.clone())
+        .collect();
+    state.preferences.favorites = Some(favorites);
+    let apps: Vec<_> = state.apps().iter().map(|app| app.id.clone()).collect();
+    assert!(apps.len() > crate::state::HOME_COLUMNS);
+    let controls = controls(&state);
+    let rect = |id: &String| {
+        controls
+            .iter()
+            .find(|control| control.target == Target::App(id.clone()))
+            .unwrap()
+            .rect
+    };
+    let card = rect(&input);
+    let below = rect(&apps[crate::state::HOME_COLUMNS]);
+    assert!(below.y >= card.y + card.h, "{card:?} overlaps {below:?}");
 }
 
 #[test]
@@ -236,7 +440,6 @@ fn widening_favorites_does_not_widen_apps_or_unclip_offscreen_rows() {
         Some(Target::App("sample".into()))
     );
     assert!(!state.wheel_scroll(&controls, Some((1860., 600.)), 0, -1));
-    assert_eq!(state.home_scroll, 0.);
     let viewport = state.content_viewport();
     let scroll_limit = controls[0].rect.y + controls[0].rect.h - (viewport.y + viewport.h - 12.);
     assert_eq!(state.scroll, 90_f32.min(scroll_limit));
@@ -254,7 +457,7 @@ fn remote_routes_from_header_and_back_through_settings() {
     state.direction(Direction::Down, &controls(&state));
     assert_eq!(state.focus, Target::Sidebar(0));
     state.activate();
-    assert_eq!(state.focus, Target::Setting(0));
+    assert_eq!(state.focus, Target::CheckUpdates);
     assert!(state.back().is_empty());
     assert_eq!(state.focus, Target::Sidebar(0));
     state.back();
@@ -311,6 +514,30 @@ fn reorder_persists_order_and_keeps_selected_identity() {
 }
 
 #[test]
+fn enter_in_the_apps_search_focuses_the_first_result() {
+    let mut state = ready();
+    state.open(1);
+    state.focus = Target::Search;
+    state.activate();
+    state.text("netflix");
+    state.submit_text_input();
+    assert!(!state.text_input_active());
+    assert_eq!(state.query, "netflix");
+    assert_eq!(state.focus, Target::App("netflix".into()));
+    // Back steps to the field, keeping the query and the Apps tab.
+    state.back();
+    assert_eq!(state.page, Page::Apps);
+    assert_eq!(state.focus, Target::Search);
+    assert_eq!(state.query, "netflix");
+    // Nothing found: focus stays on the field.
+    state.focus = Target::Search;
+    state.activate();
+    state.text("zzzz");
+    state.submit_text_input();
+    assert_eq!(state.focus, Target::Search);
+}
+
+#[test]
 fn keyboard_is_modal_and_back_preserves_then_clears_search() {
     let mut state = ready();
     state.open(1);
@@ -341,7 +568,13 @@ fn partial_refresh_preserves_valid_inputs_and_never_invents_tv_apps() {
         crate::model::Inventory::default(),
         Some("Inputs unavailable".into()),
     );
-    assert!(state.inventory.apps.is_empty());
+    assert!(
+        state
+            .inventory
+            .apps
+            .iter()
+            .all(|app| crate::model::is_builtin(&app.id))
+    );
     assert_eq!(state.inventory.inputs.len(), 3);
     // Preserved inputs still lead Home; no TV app is invented.
     assert_eq!(
@@ -410,6 +643,7 @@ fn asset_loading_and_unknown_app_cards_do_not_require_collected_artwork() {
             crate::model::Inventory {
                 apps: vec![App::new("com.example.regional", "Regional App")],
                 inputs: vec![],
+                search: None,
             },
             None,
         );
@@ -788,7 +1022,8 @@ fn clock_choices_only_highlight_focus_while_preserving_saved_checkmarks() {
     state.preferences.reduced_motion = true;
     state.preferences.show_seconds = true;
     state.open(2);
-    state.focus = Target::Setting(1);
+    state.section = crate::state::WIDGETS_SECTION;
+    state.focus = Target::Widget(5);
     state.activate();
     state.activate();
     for index in 0..2 {
@@ -823,7 +1058,8 @@ fn clock_choices_only_highlight_focus_while_preserving_saved_checkmarks() {
 fn clock_format_subpage_saves_and_restores_its_parent_row() {
     let mut state = ready();
     state.open(2);
-    state.focus = Target::Setting(1);
+    state.section = crate::state::WIDGETS_SECTION;
+    state.focus = Target::Widget(5);
     assert!(
         state
             .direction(Direction::Right, &controls(&state))
@@ -846,14 +1082,14 @@ fn clock_format_subpage_saves_and_restores_its_parent_row() {
     assert_eq!(state.focus, Target::ClockFormat);
     state.direction(Direction::Left, &controls(&state));
     assert!(state.subpage.is_none());
-    assert_eq!(state.focus, Target::Setting(1));
+    assert_eq!(state.focus, Target::Widget(5));
     state.activate();
     state.activate();
     state.direction(Direction::Left, &controls(&state));
     assert_eq!(state.subpage, Some(crate::state::Subpage::Clock));
     assert_eq!(state.focus, Target::ClockFormat);
     state.back();
-    assert_eq!(state.focus, Target::Setting(1));
+    assert_eq!(state.focus, Target::Widget(5));
     assert!(state.subpage.is_none());
 }
 
@@ -862,7 +1098,8 @@ fn time_format_selects_seconds_without_changing_the_hour_format() {
     let mut state = ready();
     state.preferences.hour_24 = true;
     state.open(2);
-    state.focus = Target::Setting(1);
+    state.section = crate::state::WIDGETS_SECTION;
+    state.focus = Target::Widget(5);
     state.direction(Direction::Right, &controls(&state));
     assert_eq!(state.subpage, Some(crate::state::Subpage::Clock));
     assert!(!state.preferences.show_seconds);
@@ -895,30 +1132,67 @@ fn time_format_selects_seconds_without_changing_the_hour_format() {
     assert!(state.preferences.hour_24);
     state.back();
     assert!(state.subpage.is_none());
-    assert_eq!(state.focus, Target::Setting(1));
+    assert_eq!(state.focus, Target::Widget(5));
 }
 
 #[test]
-fn system_version_is_inside_the_update_status_card_without_a_separate_row() {
+fn general_shows_updates_as_one_line_with_a_check_now_button() {
     let mut state = ready();
     state.open(2);
-    state.section = crate::state::SYSTEM_SECTION;
+    state.section = 0;
     state.panel_started = None;
-    let system = scene(&state);
-    assert!(system.draw.iter().any(|draw| matches!(
+    let general = scene(&state);
+    assert!(general.draw.iter().any(|draw| matches!(
         draw,
         crate::renderer::Draw::Shape(rect, _, _, color)
-            if rect.x == 640. && rect.y == 164.8 && rect.w == 1120. && rect.h == 220. && color[3] == 0.72
+            if rect.x == 640. && rect.y == 164.8 && rect.w == 1120. && rect.h == 72. && color[3] == 0.72
     )));
-    assert!(system.draw.iter().any(|draw| matches!(
+    assert!(general.draw.iter().any(|draw| matches!(
         draw,
-        crate::renderer::Draw::Text(label, _, style, color, _)
-            if label == "Current version: test" && style.size == 20.8 && style.weight == 450 && color[3] == 0.73
+        crate::renderer::Draw::Text(label, ..) if label == "test · Not checked yet"
     )));
-    assert_eq!(state.hit_test(&system.controls, 900., 200.), None);
-    state.focus = Target::Sidebar(crate::state::SYSTEM_SECTION);
-    state.direction(Direction::Right, &system.controls);
+    assert!(general.draw.iter().any(|draw| matches!(
+        draw,
+        crate::renderer::Draw::Text(label, ..) if label == "Check now"
+    )));
+    // Only the button on the right is a control; the status text is not.
+    assert_eq!(state.hit_test(&general.controls, 900., 200.), None);
+    let button = general
+        .controls
+        .iter()
+        .find(|c| c.target == Target::CheckUpdates)
+        .unwrap()
+        .rect;
+    assert!(button.x > 1400. && button.y > 164.8 && button.y + button.h < 164.8 + 72.);
+    state.focus = Target::Sidebar(0);
+    state.direction(Direction::Right, &general.controls);
     assert_eq!(state.focus, Target::CheckUpdates);
+    state.direction(Direction::Up, &general.controls);
+    assert_eq!(state.focus, Target::Nav(2));
+    state.update_response(Ok(None));
+    assert!(state.update_checked.is_some());
+    assert!(scene(&state).draw.iter().any(|draw| matches!(
+        draw,
+        crate::renderer::Draw::Text(label, ..) if label.starts_with("test · Checked ")
+    )));
+    // The scene's clock is the Unix epoch (Thursday, 1 January 1970, 12:00 AM).
+    state.update_checked = Some(crate::state::unix_now() - 3 * 86_400);
+    let stale = scene(&state);
+    let line = stale
+        .draw
+        .iter()
+        .find_map(|draw| match draw {
+            crate::renderer::Draw::Text(label, ..) if label.starts_with("test · Checked ") => {
+                Some(label.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(line.ends_with(" 12:00 AM"), "{line}");
+    assert_ne!(
+        line, "test · Checked 12:00 AM",
+        "an older check names its day"
+    );
 }
 
 #[test]
@@ -940,12 +1214,12 @@ fn system_category_owns_refresh_and_quit_and_restores_sidebar_focus() {
     assert_eq!(state.focus, Target::Sidebar(crate::state::SYSTEM_SECTION));
     assert_eq!(state.section, crate::state::SYSTEM_SECTION);
     state.direction(Direction::Right, &controls(&state));
-    assert_eq!(state.focus, Target::CheckUpdates);
-    state.direction(Direction::Down, &controls(&state));
-    assert_eq!(state.focus, Target::Setting(3));
+    assert_eq!(state.focus, Target::TvSettings);
+    for expected in [0, 4, 2, 11, 12, 8, 10, 7, 3] {
+        state.direction(Direction::Down, &controls(&state));
+        assert_eq!(state.focus, Target::Setting(expected));
+    }
     assert_eq!(state.activate(), vec![Effect::Reload]);
-    state.direction(Direction::Down, &controls(&state));
-    assert_eq!(state.focus, Target::Setting(7));
     state.direction(Direction::Down, &controls(&state));
     assert_eq!(state.focus, Target::Setting(5));
     assert_eq!(state.activate(), vec![Effect::Quit]);
@@ -1401,23 +1675,24 @@ fn deletion_completion_does_not_steal_focus_after_dismissal() {
 }
 
 #[test]
-fn app_activation_opens_options_with_open_focused_and_next_ok_launches() {
+fn app_activation_launches_and_holding_opens_options_with_open_focused() {
     for page in [0, 1] {
         let mut state = ready();
         state.open(page);
         state.focus = Target::App("netflix".into());
-        if page == 0 {
-            assert_eq!(state.activate(), vec![Effect::Launch("netflix".into())]);
-            assert!(state.overlay.is_none());
-            continue;
-        }
-        assert!(state.activate().is_empty());
-        assert!(matches!(state.overlay, Some(Overlay::Options { .. })));
-        assert_eq!(state.focus, Target::OpenApp);
         assert_eq!(state.activate(), vec![Effect::Launch("netflix".into())]);
         assert!(state.overlay.is_none());
-        assert_eq!(state.focus, Target::App("netflix".into()));
     }
+    // On the Apps page, a long press opens the options with Open focused.
+    let mut state = ready();
+    state.open(1);
+    state.focus = Target::App("netflix".into());
+    state.hold();
+    assert!(matches!(state.overlay, Some(Overlay::Options { .. })));
+    assert_eq!(state.focus, Target::OpenApp);
+    assert_eq!(state.activate(), vec![Effect::Launch("netflix".into())]);
+    assert!(state.overlay.is_none());
+    assert_eq!(state.focus, Target::App("netflix".into()));
 }
 
 #[test]
@@ -1494,7 +1769,8 @@ fn reduced_motion_disables_panel_wallpaper_and_notification_animation() {
     let mut state = ready();
     state.preferences.reduced_motion = true;
     state.open(2);
-    state.focus = Target::Setting(1);
+    state.section = crate::state::WIDGETS_SECTION;
+    state.focus = Target::Widget(5);
     state.activate();
     assert!(!state.animating());
     state.back();
@@ -1533,6 +1809,8 @@ fn weather_location_keyboard_back_and_sidebar_routes_restore_focus() {
     state.focus = Target::Sidebar(crate::state::WIDGETS_SECTION);
     state.section = crate::state::WIDGETS_SECTION;
     state.activate();
+    assert_eq!(state.focus, Target::Widget(5));
+    state.direction(Direction::Down, &controls(&state));
     assert_eq!(state.focus, Target::Widget(4));
     state.direction(Direction::Down, &controls(&state));
     assert_eq!(state.focus, Target::Widget(0));
@@ -1717,16 +1995,18 @@ fn settings_order_language_sort_and_shortcut_empty_card() {
     }
     let mut state = ready();
     state.open(2);
-    let general = controls(&state);
-    let language = general
+    state.section = crate::state::SYSTEM_SECTION;
+    let system = controls(&state);
+    let language = system
         .iter()
         .find(|control| control.target == Target::Setting(4))
         .unwrap();
-    let motion = general
+    let motion = system
         .iter()
         .find(|control| control.target == Target::Setting(2))
         .unwrap();
     assert!(language.rect.y < motion.rect.y);
+    state.section = crate::state::WIDGETS_SECTION;
     state.subpage = Some(Subpage::Shortcuts);
     let empty = scene(&state);
     assert!(empty.draw.iter().any(|draw| matches!(draw,
@@ -1960,7 +2240,12 @@ fn remote_renames_and_resets_an_input_from_its_settings_page() {
     state.activate();
     assert_eq!(state.focus, Target::Choice(2));
     state.direction(Direction::Down, &controls(&state));
+    assert_eq!(state.focus, Target::Choice(3), "Apps only follows Auto");
+    state.direction(Direction::Down, &controls(&state));
     assert_eq!(state.focus, Target::InputRename);
+    state.direction(Direction::Up, &controls(&state));
+    assert_eq!(state.focus, Target::Choice(3));
+    state.direction(Direction::Down, &controls(&state));
     assert!(
         !controls(&state)
             .iter()
@@ -1987,7 +2272,7 @@ fn remote_renames_and_resets_an_input_from_its_settings_page() {
     assert!(state.preferences.input_names.is_empty());
     assert_eq!(state.focus, Target::InputRename);
     state.direction(Direction::Up, &controls(&state));
-    assert_eq!(state.focus, Target::Choice(2));
+    assert_eq!(state.focus, Target::Choice(3));
     state.focus = Target::InputRename;
     state.direction(Direction::Left, &controls(&state));
     assert_eq!(state.focus, Target::InputMode(id));
@@ -2387,7 +2672,7 @@ fn widgets_group_existing_settings_and_restore_each_parent_without_changing_pref
     state.direction(Direction::Down, &controls(&state));
     assert_eq!(state.focus, Target::Sidebar(WIDGETS_SECTION));
     state.direction(Direction::Right, &controls(&state));
-    assert_eq!(state.focus, Target::Widget(4));
+    assert_eq!(state.focus, Target::Widget(5));
     let widget_order: Vec<_> = controls(&state)
         .into_iter()
         .filter_map(|control| match control.target {
@@ -2395,7 +2680,7 @@ fn widgets_group_existing_settings_and_restore_each_parent_without_changing_pref
             _ => None,
         })
         .collect();
-    assert_eq!(widget_order, [4, 0, 1, 2, 3]);
+    assert_eq!(widget_order, [5, 4, 0, 1, 2, 3]);
     for (index, subpage) in [
         Subpage::Greeting,
         Subpage::Weather,
@@ -2477,10 +2762,11 @@ fn widgets_are_localized_without_legacy_sidebar_entries() {
                 .iter()
                 .filter(|c| matches!(c.target, Target::Widget(_)))
                 .count(),
-            5
+            6
         );
         for key in [
             "widgets",
+            "clock",
             "greeting",
             "weather",
             "shortcuts",
@@ -2593,10 +2879,12 @@ fn language_list_scrolls_under_fixed_ui_without_clipping_or_fades() {
     state.subpage = Some(Subpage::Language);
     state.scroll = 180.;
     let rendered = scene(&state);
-    assert!(!rendered.draw.iter().any(|draw| matches!(
-        draw,
-        Draw::Clip(Some(_)) | Draw::EdgeFade(Some(_)) | Draw::EdgeFadeX(Some(_))
-    )));
+    assert!(
+        !rendered
+            .draw
+            .iter()
+            .any(|draw| matches!(draw, Draw::Clip(Some(_)) | Draw::EdgeFade(Some(_))))
+    );
     let first = rendered
         .controls
         .iter()
@@ -2644,10 +2932,12 @@ fn apps_scroll_behind_navigation_without_a_top_cutoff_or_fade() {
     state.open(1);
     state.scroll = 400.;
     let rendered = scene(&state);
-    assert!(!rendered.draw.iter().any(|draw| matches!(
-        draw,
-        Draw::Clip(Some(_)) | Draw::EdgeFade(Some(_)) | Draw::EdgeFadeX(Some(_))
-    )));
+    assert!(
+        !rendered
+            .draw
+            .iter()
+            .any(|draw| matches!(draw, Draw::Clip(Some(_)) | Draw::EdgeFade(Some(_))))
+    );
     let card = rendered
         .draw
         .iter()
@@ -2816,21 +3106,28 @@ fn clock_and_date_use_larger_text() {
 }
 
 #[test]
-fn tv_settings_button_is_centered_alongside_navigation() {
-    let rendered = scene(&ready());
-    let button = rendered
+fn tv_settings_lives_in_system_settings_instead_of_the_header() {
+    let home = scene(&ready());
+    assert!(!home.controls.iter().any(|c| c.target == Target::TvSettings));
+    let mut state = ready();
+    state.open(2);
+    state.section = crate::state::SYSTEM_SECTION;
+    state.panel_started = None;
+    let rendered = scene(&state);
+    let row = rendered
         .controls
         .iter()
         .find(|control| control.target == Target::TvSettings)
         .unwrap();
-    assert!((button.rect.y + button.rect.h / 2. - (42.5 + 68.6 / 2.)).abs() < 0.01);
-    assert_eq!(button.rect.h, 60.);
-    assert_eq!(button.rect.w, button.rect.h);
-    assert_eq!(button.rect.x + button.rect.w, 1836.);
-    let (x, y) = button.rect.center();
+    let (x, y) = row.rect.center();
     assert_eq!(
-        ready().hit_test(&rendered.controls, x, y),
+        state.hit_test(&rendered.controls, x, y),
         Some(Target::TvSettings)
+    );
+    state.focus = Target::TvSettings;
+    assert_eq!(
+        state.activate(),
+        vec![Effect::Launch("com.palm.app.settings".into())]
     );
 }
 
@@ -2988,7 +3285,7 @@ fn update_card_shows_both_versions_and_explicitly_starts_installation() {
         let mut state = ready();
         state.preferences.language = language;
         state.open(2);
-        state.section = crate::state::SYSTEM_SECTION;
+        state.section = 0;
         assert!(
             !controls(&state)
                 .iter()
@@ -2997,11 +3294,10 @@ fn update_card_shows_both_versions_and_explicitly_starts_installation() {
         state.available_update = Some("9.0.0".into());
         let rendered = scene(&state);
         for label in [
-            language.t("updateAvailable").to_owned(),
             language.format("installUpdate", &[("version", "9.0.0")]),
-            language.format(
-                "updateVersions",
-                &[("current", "test"), ("latest", "9.0.0")],
+            format!(
+                "test · {}",
+                language.format("updateReady", &[("latest", "9.0.0")])
             ),
         ] {
             assert!(
@@ -3011,7 +3307,7 @@ fn update_card_shows_both_versions_and_explicitly_starts_installation() {
                     .any(|draw| matches!(draw, Draw::Text(text, ..) if text == &label))
             );
         }
-        state.focus = Target::Sidebar(crate::state::SYSTEM_SECTION);
+        state.focus = Target::Sidebar(0);
         state.direction(Direction::Right, &rendered.controls);
         assert_eq!(state.focus, Target::InstallUpdate);
         assert_eq!(
@@ -3028,11 +3324,8 @@ fn update_card_shows_both_versions_and_explicitly_starts_installation() {
             state.hit_test(&rendered.controls, x, y),
             Some(Target::InstallUpdate)
         );
-        state.direction(Direction::Down, &rendered.controls);
-        assert_eq!(state.focus, Target::Setting(3));
-        state.focus = Target::InstallUpdate;
         state.direction(Direction::Left, &rendered.controls);
-        assert_eq!(state.focus, Target::Sidebar(crate::state::SYSTEM_SECTION));
+        assert_eq!(state.focus, Target::Sidebar(0));
     }
 }
 
@@ -3041,12 +3334,16 @@ fn update_status_card_only_claims_latest_after_success_and_allows_single_flight_
     use crate::{renderer::Draw, update::Status};
     let mut state = ready();
     state.open(2);
-    state.section = crate::state::SYSTEM_SECTION;
+    state.section = 0;
     state.focus = Target::CheckUpdates;
     assert_eq!(state.update_status, Status::Unchecked);
-    assert!(!scene(&state).draw.iter().any(|draw| matches!(draw,
-        Draw::Text(label, ..) if label == state.preferences.language.t("latestVersionInstalled")
-    )));
+    let has = |state: &State, wanted: &str| {
+        scene(state)
+            .draw
+            .iter()
+            .any(|draw| matches!(draw, Draw::Text(label, ..) if label == wanted))
+    };
+    assert!(!has(&state, "test · Checked 12:00 AM"));
     assert!(state.activate().is_empty());
     assert_eq!(state.update_status, Status::Checking);
     assert!(std::mem::take(&mut state.update_check_requested));
@@ -3054,18 +3351,17 @@ fn update_status_card_only_claims_latest_after_success_and_allows_single_flight_
     assert!(!state.update_check_requested);
     state.update_response(Err("offline".into()));
     assert_eq!(state.update_status, Status::Failed);
-    assert!(!scene(&state).draw.iter().any(|draw| matches!(draw,
-        Draw::Text(label, ..) if label == state.preferences.language.t("latestVersionInstalled")
-    )));
+    assert!(state.update_checked.is_none());
+    assert!(has(&state, "test · Couldn't check for updates"));
     state.activate();
     assert!(std::mem::take(&mut state.update_check_requested));
     state.update_response(Ok(None));
     assert_eq!(state.update_status, Status::Checked);
-    for key in ["latestVersionInstalled", "checkAgain"] {
-        assert!(scene(&state).draw.iter().any(|draw| matches!(draw,
-            Draw::Text(label, ..) if label == state.preferences.language.t(key)
-        )));
-    }
+    assert!(state.update_checked.is_some());
+    assert!(has(&state, "Check now"));
+    assert!(scene(&state).draw.iter().any(|draw| matches!(draw,
+        Draw::Text(label, ..) if label.starts_with("test · Checked ")
+    )));
     state.activate();
     state.update_response(Ok(Some("9.0.0".into())));
     assert_eq!(state.focus, Target::InstallUpdate);
@@ -3092,7 +3388,8 @@ fn shortcut_tiles_keep_apps_options_and_never_launch_or_uninstall_a_platform_app
 
     state.open(1);
     state.focus = Target::App(tile.id.clone());
-    assert!(state.activate().is_empty());
+    assert_eq!(state.activate(), vec![Effect::FireWebhook(tile.clone())]);
+    state.hold();
     assert_eq!(state.focus, Target::OpenApp);
     assert!(matches!(state.overlay, Some(Overlay::Options { .. })));
     assert!(
@@ -3218,7 +3515,7 @@ fn update_card_shows_progress_restores_retry_and_ignores_presses_while_busy() {
     use crate::update::{InstallStatus, Response, Status};
     let mut state = ready();
     state.open(2);
-    state.section = crate::state::SYSTEM_SECTION;
+    state.section = 0;
     state.focus = Target::CheckUpdates;
     assert!(state.activate().is_empty());
     assert_eq!(state.update_status, Status::Checking);
@@ -3270,6 +3567,9 @@ fn update_card_shows_progress_restores_retry_and_ignores_presses_while_busy() {
     assert!(state.activate().is_empty());
     state.pressed = Some(Target::InstallUpdate);
     state.install_response(Response::Finished(Err("disk full".into())));
+    assert!(scene(&state).draw.iter().any(|draw| {
+        matches!(draw, crate::renderer::Draw::Text(text, ..) if text == "test · Update failed")
+    }));
     assert_eq!(state.focus, Target::CheckUpdates);
     assert!(state.pressed.is_none());
     assert!(state.available_update.is_none());
@@ -3277,23 +3577,46 @@ fn update_card_shows_progress_restores_retry_and_ignores_presses_while_busy() {
     state.activate();
     assert_eq!(state.update_status, Status::Checking);
     assert_eq!(state.update, InstallStatus::Idle);
+    state.update_checked = Some(crate::state::unix_now());
     state.install_response(Response::Finished(Ok(())));
     assert_eq!(state.update_status, Status::Unchecked);
+    // The running build may be the old one: never claim it was just checked.
+    assert!(scene(&state).draw.iter().any(|draw| {
+        matches!(draw, crate::renderer::Draw::Text(text, ..) if text == "test · Not checked yet")
+    }));
 }
 
 #[test]
-fn turning_on_home_assistant_opens_the_hacs_qr_dialog_and_adds_a_reopen_row() {
+fn home_assistant_is_one_system_row_with_toggle_and_setup_code_inside() {
+    use crate::state::{SYSTEM_SECTION, Subpage};
     let mut state = ready();
     state.open(2);
+    state.section = SYSTEM_SECTION;
+    let system = controls(&state);
+    assert_eq!(
+        system
+            .iter()
+            .filter(|c| matches!(c.target, Target::Setting(8)))
+            .count(),
+        1
+    );
+    state.focus = Target::Setting(8);
+    state.direction(Direction::Right, &system);
+    assert_eq!(state.subpage, Some(Subpage::HomeAssistant));
+    assert_eq!(state.focus, Target::HomeAssistantToggle);
     let rows = |state: &State| {
         scene(state)
             .controls
             .iter()
-            .filter(|control| matches!(control.target, Target::Setting(8 | 9)))
+            .filter(|c| {
+                matches!(
+                    c.target,
+                    Target::HomeAssistantToggle | Target::HomeAssistantCode
+                )
+            })
             .count()
     };
     assert_eq!(rows(&state), 1);
-    state.focus = Target::Setting(8);
     assert_eq!(state.activate(), vec![Effect::Save]);
     assert!(state.preferences.home_assistant);
     assert!(matches!(state.overlay, Some(Overlay::HomeAssistantSetup)));
@@ -3312,16 +3635,342 @@ fn turning_on_home_assistant_opens_the_hacs_qr_dialog_and_adds_a_reopen_row() {
     state.back();
     assert!(state.overlay.is_none());
     assert!(state.home_assistant_qr.is_none());
-    assert_eq!(state.focus, Target::Setting(9));
+    assert_eq!(state.focus, Target::HomeAssistantCode);
     assert_eq!(rows(&state), 2);
-    // The second row reopens the dialog without touching the setting or its pairings.
+    // The setup row reopens the dialog without touching the setting or its pairings.
     assert_eq!(state.activate(), vec![]);
     assert!(matches!(state.overlay, Some(Overlay::HomeAssistantSetup)));
     assert!(state.preferences.home_assistant);
     state.back();
-    state.focus = Target::Setting(8);
+    state.direction(Direction::Up, &controls(&state));
+    assert_eq!(state.focus, Target::HomeAssistantToggle);
     state.activate();
     assert!(!state.preferences.home_assistant);
     assert!(state.overlay.is_none());
     assert_eq!(rows(&state), 1);
+    state.back();
+    assert!(state.subpage.is_none());
+    assert_eq!(state.focus, Target::Setting(8));
+}
+
+#[test]
+fn cameras_app_is_listed_only_while_home_assistant_is_on_and_opens_the_gallery() {
+    use crate::model::CAMERAS_APP;
+    let mut state = ready();
+    let listed = |state: &State| state.inventory.apps.iter().any(|app| app.id == CAMERAS_APP);
+    assert!(!listed(&state));
+    state.preferences.home_assistant = true;
+    state.sync_custom_tiles();
+    assert!(listed(&state));
+    // A refreshed inventory keeps it once, and it is never offered for uninstall.
+    state.set_inventory(demo_inventory(), None);
+    assert_eq!(
+        state
+            .inventory
+            .apps
+            .iter()
+            .filter(|app| app.id == CAMERAS_APP)
+            .count(),
+        1
+    );
+    assert!(!crate::platform::can_uninstall(CAMERAS_APP));
+    let app = state
+        .inventory
+        .apps
+        .iter()
+        .find(|app| app.id == CAMERAS_APP)
+        .unwrap();
+    assert_eq!((app.title.as_str(), app.mark), ("Cameras", "camera"));
+    state.focus = Target::App(CAMERAS_APP.into());
+    assert_eq!(state.activate(), vec![Effect::Launch(CAMERAS_APP.into())]);
+    state.preferences.home_assistant = false;
+    state.sync_custom_tiles();
+    assert!(!listed(&state));
+}
+
+#[test]
+fn lg_home_tile_is_listed_once_and_launches_through_luma() {
+    use crate::model::LG_HOME_APP;
+    let mut state = ready();
+    state.sync_custom_tiles();
+    state.set_inventory(demo_inventory(), None);
+    let tiles: Vec<_> = state
+        .inventory
+        .apps
+        .iter()
+        .filter(|app| app.id == LG_HOME_APP)
+        .collect();
+    assert_eq!(tiles.len(), 1);
+    assert_eq!((tiles[0].title.as_str(), tiles[0].mark), ("LG Home", "tv"));
+    assert!(!crate::platform::can_uninstall(LG_HOME_APP));
+    state.focus = Target::App(LG_HOME_APP.into());
+    assert_eq!(state.activate(), vec![Effect::Launch(LG_HOME_APP.into())]);
+}
+
+#[test]
+fn luma_as_home_is_on_by_default_and_turning_it_on_reclaims_home() {
+    let mut state = ready();
+    assert!(state.preferences.luma_home);
+    state.section = crate::state::SYSTEM_SECTION;
+    state.focus = Target::Setting(11);
+    assert_eq!(state.activate(), vec![Effect::Save]);
+    assert!(!state.preferences.luma_home);
+    assert_eq!(state.activate(), vec![Effect::Save, Effect::ReclaimHome]);
+    assert!(state.preferences.luma_home);
+    // Older preference files without the key keep the default.
+    let preferences: Preferences = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(preferences.luma_home);
+}
+
+#[test]
+fn preferences_keep_settings_from_a_newer_luma() {
+    let mut preferences: Preferences = serde_json::from_value(serde_json::json!({
+        "background": "forest",
+        "input_modes": {"com.webos.app.hdmi1": "On"},
+        "apps_only_inputs": ["com.webos.app.hdmi2"],
+        "a_future_setting": {"on": true},
+        "show_names": true,
+    }))
+    .unwrap();
+    preferences.sanitize();
+    assert_eq!(preferences.background, "forest");
+    assert_eq!(preferences.input_modes.len(), 2);
+    // Only the unknown key is kept aside; known ones, flattened ones included, are not.
+    assert_eq!(
+        preferences.extra.keys().collect::<Vec<_>>(),
+        ["a_future_setting"]
+    );
+    let saved = serde_json::to_value(&preferences).unwrap();
+    assert_eq!(saved["a_future_setting"], serde_json::json!({"on": true}));
+    assert_eq!(saved["input_modes"]["com.webos.app.hdmi1"], "On");
+    assert_eq!(
+        saved["apps_only_inputs"],
+        serde_json::json!(["com.webos.app.hdmi2"])
+    );
+}
+
+#[test]
+fn a_pairing_request_shows_its_code_in_place_of_the_setup_qr_code() {
+    let mut state = ready();
+    let home = state.focus.clone();
+    // Home Assistant asks to pair while Luma is on Home: the setup dialog opens with the code.
+    assert!(state.home_assistant_pairing("123456".into()));
+    assert!(matches!(state.overlay, Some(Overlay::HomeAssistantSetup)));
+    assert_eq!(state.home_assistant_code.as_deref(), Some("123456"));
+    let shows = |state: &State, wanted: &str| {
+        scene(state)
+            .draw
+            .iter()
+            .any(|draw| matches!(draw, crate::renderer::Draw::Text(value, ..) if value == wanted))
+    };
+    assert!(shows(&state, "123 456"));
+    // It lapses: the QR code comes back. Then a new code, and pairing succeeds.
+    state.home_assistant_pairing_ended();
+    assert_eq!(state.home_assistant_code, None);
+    assert!(state.home_assistant_pairing("654321".into()));
+    assert!(state.home_assistant_paired_with("Home".into()));
+    assert_eq!(state.home_assistant_code, None);
+    assert_eq!(state.home_assistant_paired.as_deref(), Some("Home"));
+    // Closing returns focus to where it was, not to a Settings row.
+    state.back();
+    assert!(state.overlay.is_none());
+    assert_eq!(state.focus, home);
+    assert_eq!(state.home_assistant_paired, None);
+    // Without the dialog, a success is left to a notice.
+    assert!(!state.home_assistant_paired_with("Home".into()));
+}
+
+#[test]
+fn header_search_button_hands_off_to_lg_search() {
+    let mut state = ready();
+    let search = state.inventory.search.clone().expect("demo has LG search");
+    for page in [0, 1, 2] {
+        state.open(page);
+        assert!(
+            controls(&state)
+                .iter()
+                .any(|c| c.target == Target::LgSearch),
+            "page {page} shows the button"
+        );
+    }
+    // Right past the last tab reaches it without changing page; Left and Back return.
+    state.open(2);
+    state.focus = Target::Nav(2);
+    state.direction(Direction::Right, &controls(&state));
+    assert_eq!(state.focus, Target::LgSearch);
+    assert_eq!(state.page, Page::Settings);
+    state.direction(Direction::Left, &controls(&state));
+    assert_eq!(state.focus, Target::Nav(2));
+    state.focus = Target::LgSearch;
+    state.back();
+    assert_eq!(state.focus, Target::Nav(2));
+    state.open(0);
+    state.focus = Target::LgSearch;
+    state.direction(Direction::Down, &controls(&state));
+    assert_eq!(state.focus, state.first_content());
+    state.open(2);
+
+    state.focus = Target::LgSearch;
+    assert!(matches!(&state.activate()[..], [Effect::Launch(id)] if *id == search));
+
+    // A TV without LG search shows no button, and Right never lands on it.
+    let mut inventory = demo_inventory();
+    inventory.search = None;
+    state.set_inventory(inventory, None);
+    assert_eq!(state.focus, Target::Nav(2));
+    assert!(
+        !controls(&state)
+            .iter()
+            .any(|c| c.target == Target::LgSearch)
+    );
+    state.direction(Direction::Right, &controls(&state));
+    assert_ne!(state.focus, Target::LgSearch);
+}
+
+#[test]
+fn right_edge_moves_never_jump_to_the_header_search_button() {
+    let mut state = ready();
+    state.open(1);
+    // Right from the empty search field keeps its existing route into the grid.
+    state.focus = Target::Search;
+    state.direction(Direction::Right, &controls(&state));
+    assert_ne!(state.focus, Target::LgSearch);
+    let right_column = state.apps()[crate::state::APPS_COLUMNS - 1].id.clone();
+    state.focus = Target::App(right_column.clone());
+    state.direction(Direction::Right, &controls(&state));
+    assert_eq!(state.focus, Target::App(right_column));
+}
+
+#[test]
+fn streaming_keys_row_opens_a_phone_dialog_and_shows_only_whether_keys_are_set() {
+    let mut state = ready();
+    state.preferences.reduced_motion = true;
+    state.open(2);
+    // The row sits in System, after Home Assistant.
+    state.section = crate::state::SYSTEM_SECTION;
+    let value = |state: &State, label: &str| {
+        scene(state)
+            .draw
+            .iter()
+            .any(|draw| matches!(draw, crate::renderer::Draw::Text(text, ..) if text == label))
+    };
+    let row = scene(&state)
+        .controls
+        .iter()
+        .find(|control| control.target == Target::Setting(10))
+        .cloned()
+        .expect("Streaming search keys row");
+    assert!(value(&state, "Streaming search keys"));
+    assert!(value(&state, "Not set"));
+    state.streaming_keys = crate::streaming_keys::Status {
+        motn: true,
+        tmdb: false,
+        mdblist: false,
+        home_assistant: false,
+    };
+    assert!(value(&state, "Incomplete"));
+    state.streaming_keys.tmdb = true;
+    assert!(value(&state, "Set"));
+    state.streaming_keys.home_assistant = true;
+    assert!(value(&state, "From Home Assistant"));
+
+    state.focus = row.target.clone();
+    assert!(state.activate().is_empty());
+    assert!(matches!(state.overlay, Some(Overlay::StreamingKeys)));
+    assert_eq!(state.focus, Target::CloseDialog);
+    let dialog = scene(&state);
+    assert!(dialog.modal.is_some());
+    assert!(
+        dialog
+            .controls
+            .iter()
+            .all(|control| control.target == Target::CloseDialog)
+    );
+    assert!(value(&state, "Add keys on phone or computer"));
+    assert!(state.direction(Direction::Up, &dialog.controls).is_empty());
+    assert_eq!(state.focus, Target::CloseDialog);
+    state.key_editor = Some(Err("offline".into()));
+    assert!(value(
+        &state,
+        "Couldn’t start local setup. Check your network connection, then close and reopen this dialog."
+    ));
+    state.back();
+    assert!(state.overlay.is_none());
+    assert!(state.key_editor.is_none());
+    assert_eq!(state.focus, Target::Setting(10));
+    // Right opens it too, like the other rows with a chevron.
+    let controls = scene(&state).controls;
+    state.direction(Direction::Right, &controls);
+    assert!(matches!(state.overlay, Some(Overlay::StreamingKeys)));
+}
+
+#[test]
+fn text_typed_on_a_phone_replaces_the_open_field_and_commits_it() {
+    let mut state = ready();
+    // No field open: nothing changes.
+    state.set_editing_text("ignored");
+    assert_eq!(state.query, "");
+
+    state.open_keyboard(crate::state::TextField::Apps);
+    state.text("du");
+    state.set_editing_text("Dune\u{7}");
+    assert_eq!(state.query, "Dune");
+    state.set_editing_text(&"x".repeat(200));
+    assert_eq!(state.query.chars().count(), 120);
+
+    state.open_keyboard(crate::state::TextField::Titles);
+    state.text("al");
+    state.set_editing_text("Alien");
+    assert_eq!(state.title_query, "Alien");
+
+    state.open(2);
+    state.subpage = Some(crate::state::Subpage::Input("HDMI_1".into()));
+    state.open_keyboard(crate::state::TextField::InputName);
+    state.set_editing_text("Console");
+    assert_eq!(state.finish_text_input(), vec![Effect::Save]);
+    assert_eq!(
+        state
+            .preferences
+            .input_names
+            .get("HDMI_1")
+            .map(String::as_str),
+        Some("Console")
+    );
+    assert!(!state.text_input_active());
+}
+
+#[test]
+fn the_update_channel_switches_between_releases_and_nightlies_and_checks_again() {
+    let mut state = ready();
+    assert!(
+        !state.preferences.nightly_updates,
+        "releases only by default"
+    );
+    state.available_update = Some("2.33.0".into());
+    state.open(2);
+    state.section = 3;
+    state.focus = Target::Setting(12);
+    assert_eq!(state.activate(), vec![Effect::Save]);
+    assert!(state.preferences.nightly_updates);
+    assert!(
+        state.update_check_requested,
+        "the new channel is checked at once"
+    );
+    assert_eq!(state.available_update, None);
+    assert_eq!(state.update_status, crate::update::Status::Checking);
+    assert_eq!(
+        crate::update::feeds(),
+        [crate::update::NIGHTLY_FEED, crate::update::FEED]
+    );
+    // Not while an update installs.
+    state.update = crate::update::InstallStatus::Installing("2.33.0".into());
+    assert_eq!(state.activate(), vec![]);
+    assert!(state.preferences.nightly_updates);
+    // Nor while the new channel is still being checked; once it answers, back to releases.
+    state.update = crate::update::InstallStatus::Idle;
+    assert_eq!(state.activate(), vec![]);
+    state.update_response(Ok(None));
+    assert_eq!(state.activate(), vec![Effect::Save]);
+    assert!(!state.preferences.nightly_updates);
+    assert_eq!(crate::update::feeds(), [crate::update::FEED]);
 }

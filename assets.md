@@ -32,9 +32,13 @@
 - SDL-webOS 2.30.12 (`release-2.30.12-webos.5`, standard SDL ABI), zlib license.
   `tools/webos-runtime.mjs` records archive/library SHA-256. Notice at `assets/licenses/sdl2.txt`.
 - QR Code generator (`qrcodegen`): Project Nayuki, MIT; `assets/licenses/qrcodegen.txt`.
+- hls.js 1.5.20 light build (`overlay/vendor/hls.light.min.js`): Dailymotion, Apache-2.0; notice at
+  `overlay/vendor/hls.js-LICENSE.txt`, shipped with the overlay app.
 - Local interface discovery (`if-addrs`): MaidSafe.net limited and messense, MIT;
   `assets/licenses/if-addrs.txt`.
-- `assets/ui-icons/upload.svg` and `assets/wallpaper-upload/`: original Luma artwork/UI, MIT.
+- `assets/ui-icons/upload.svg`, `assets/ui-icons/tomato.svg` and `assets/wallpaper-upload/`: original
+  Luma artwork/UI, MIT. The tomato is a generic shape for critics scores, not the Rotten Tomatoes
+  logo. `popcorn.svg` and `star-filled.svg` are Lucide 0.460.0 icons (ISC).
 
 The bundled icon/logo SVG sources are compiled into derived `.lvec` triangles with the same
 source licenses. Apple TV, Disney+, Prime Video and Das Erste retain the white display treatment.

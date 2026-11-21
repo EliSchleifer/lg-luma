@@ -1,0 +1,468 @@
+use super::*;
+use crate::motn_api::ShowType;
+use std::{path::Path, sync::Mutex};
+
+/// Captured replies (see `pnpm fixtures:streaming`), recording every request made.
+#[derive(Default)]
+struct Fixtures {
+    calls: Mutex<Vec<String>>,
+    tmdb_down: bool,
+    no_tmdb: bool,
+    /// A captured title search whose shows also answer lookups of one show.
+    shows_from: Option<&'static str>,
+}
+
+fn missing() -> Error {
+    Error::Status {
+        status: 404,
+        message: "not captured".into(),
+    }
+}
+
+impl Fixtures {
+    fn read<T: DeserializeOwned>(&self, dir: &str, name: &str) -> Result<T, Error> {
+        self.calls.lock().unwrap().push(format!("{dir}/{name}"));
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(dir)
+            .join(format!("{name}.json"));
+        let bytes = std::fs::read(path).map_err(|_| missing())?;
+        let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        Ok(serde_json::from_value(crate::relevance::tests::with_titles(
+            dir,
+            name,
+            record["response"].clone(),
+        ))
+        .unwrap())
+    }
+
+    fn calls(&self, prefix: &str) -> Vec<String> {
+        let calls = self.calls.lock().unwrap();
+        let mut calls: Vec<_> = calls
+            .iter()
+            .filter(|call| call.starts_with(prefix))
+            .cloned()
+            .collect();
+        calls.sort();
+        calls
+    }
+}
+
+fn slug(query: &str) -> String {
+    match query {
+        "amélie" => "amelie".into(),
+        other => other.replace(' ', "-"),
+    }
+}
+
+impl Source for Fixtures {
+    fn search(&self, query: &str, _country: &str) -> Result<Vec<Show>, Error> {
+        self.read("streaming", &format!("search-title-{}", slug(query)))
+    }
+    fn show(&self, id: &str, _country: &str) -> Result<Show, Error> {
+        let captured = self.read("streaming", &format!("show-{}", id.replace('/', "-")));
+        match (captured, self.shows_from) {
+            (Err(_), Some(search)) => self
+                .read::<Vec<Show>>("streaming", &format!("search-title-{search}"))?
+                .into_iter()
+                .find(|show| show.tmdb_id == id)
+                .ok_or_else(missing),
+            (captured, _) => captured,
+        }
+    }
+    fn tmdb_search(&self, query: &str) -> Option<Result<Vec<SearchMultiResponseResult>, Error>> {
+        if self.no_tmdb {
+            return None;
+        }
+        if self.tmdb_down {
+            return Some(Err(Error::Network("timeout".into())));
+        }
+        Some(
+            self.read::<tmdb_api::SearchMultiResponse>(
+                "tmdb",
+                &format!("search-multi-{}", slug(query)),
+            )
+            .map(|reply| reply.results.unwrap_or_default()),
+        )
+    }
+    fn movie(&self, id: i64) -> Result<MovieDetailsResponse, Error> {
+        self.read("tmdb", &format!("movie-{id}"))
+    }
+    fn series(&self, id: i64) -> Result<TvSeriesDetailsResponse, Error> {
+        self.read("tmdb", &format!("tv-{id}"))
+    }
+    fn collection(&self, id: i64) -> Result<CollectionDetailsResponse, Error> {
+        self.read("tmdb", &format!("collection-{id}"))
+    }
+}
+
+fn ids(results: &[Ranked]) -> Vec<&str> {
+    results.iter().map(|r| r.show.tmdb_id.as_str()).collect()
+}
+
+#[test]
+fn ghostbusters_end_to_end_lists_the_five_films_from_1984() {
+    let source = Fixtures::default();
+    let results = search(&source, "ghostbusters", "us", &Services::default()).unwrap();
+    assert_eq!(
+        ids(&results)[..5],
+        [
+            "movie/620",
+            "movie/2978",
+            "movie/43074",
+            "movie/425909",
+            "movie/967847"
+        ]
+    );
+    assert!(
+        results[5..]
+            .iter()
+            .all(|r| r.show.show_type == ShowType::Series)
+    );
+    // The collection was consulted, and every film in it was already found by the search.
+    assert_eq!(source.calls("tmdb/collection"), ["tmdb/collection-2980"]);
+    assert!(source.calls("streaming/show-").is_empty());
+}
+
+#[test]
+fn the_free_search_summary_spares_details_calls_for_titles_that_cannot_rank() {
+    let source = Fixtures::default();
+    search(&source, "gho", "us", &Services::default()).unwrap();
+    let details = source.calls("tmdb/movie-").len() + source.calls("tmdb/tv-").len();
+    // Movie of the Night returned 20 shows; foreign and little-seen titles were ruled out by
+    // the search summary without a call. Ghost (1990) is in English and was looked up.
+    assert!(source.calls("tmdb/movie-251").len() == 1);
+    assert!(details < 20, "{details} details calls");
+    // Shikshanachya Aaicha Gho! and Gho Mala Asala Hawa: Marathi, ruled out by the summary.
+    for skipped in ["tmdb/movie-114564", "tmdb/movie-1222309"] {
+        assert!(
+            !source.calls("tmdb/").iter().any(|call| call == skipped),
+            "{skipped}"
+        );
+    }
+    // Ghost (2023, Kannada) is not on TMDB's first page for "gho", so it has no summary: it
+    // is looked up, then filtered out like the others.
+    assert_eq!(source.calls("tmdb/movie-1040194").len(), 1);
+}
+
+#[test]
+fn half_a_franchise_title_lists_all_its_films() {
+    // Movie of the Night returns Ghostbusters (1984) and Frozen Empire for "gho". The other
+    // films are not captured one by one, so they are read from the "ghostbusters" search.
+    let source = Fixtures {
+        shows_from: Some("ghostbusters"),
+        ..Default::default()
+    };
+    let results = search(&source, "gho", "us", &Services::default()).unwrap();
+    let all = ids(&results);
+    let first = all.iter().position(|id| *id == "movie/620").unwrap();
+    // Together, oldest first: the collection's films and the 2016 film, which is in none.
+    assert_eq!(
+        all[first..first + 5],
+        [
+            "movie/620",
+            "movie/2978",
+            "movie/43074",
+            "movie/425909",
+            "movie/967847"
+        ],
+        "{all:?}"
+    );
+    // One metered call for each film the title search missed.
+    assert_eq!(
+        source.calls("streaming/show-"),
+        [
+            "streaming/show-movie-2978",
+            "streaming/show-movie-425909",
+            "streaming/show-movie-43074"
+        ]
+    );
+}
+
+#[test]
+fn franchise_films_the_title_search_missed_are_looked_up() {
+    let source = Fixtures::default();
+    search(&source, "star wars", "us", &Services::default()).unwrap();
+    // The Star Wars collection lists films the 20 title results did not include; each is
+    // requested from Movie of the Night (not captured here, so they are simply skipped).
+    assert!(
+        source
+            .calls("tmdb/collection")
+            .contains(&"tmdb/collection-10".to_owned()),
+        "{:?}",
+        source.calls("tmdb/collection")
+    );
+    let shows = source.calls("streaming/show-");
+    assert!(
+        !shows.is_empty() && shows.len() <= EXPANSION_LIMIT,
+        "{shows:?}"
+    );
+}
+
+#[test]
+fn without_tmdb_results_keep_the_order_of_where_they_stream() {
+    let services = Services::default();
+    let expected = {
+        let shows: Vec<Show> = Fixtures::default()
+            .read("streaming", "search-title-gho")
+            .unwrap();
+        streaming::rank(&shows, "us", &services)
+    };
+    for source in [
+        Fixtures {
+            tmdb_down: true,
+            ..Default::default()
+        },
+        Fixtures {
+            no_tmdb: true,
+            ..Default::default()
+        },
+    ] {
+        assert_eq!(search(&source, "gho", "us", &services).unwrap(), expected);
+        assert!(source.calls("tmdb/").is_empty());
+    }
+}
+
+#[test]
+fn a_movie_of_the_night_failure_is_the_search_error() {
+    let source = Fixtures::default();
+    let error = search(&source, "not captured", "us", &Services::default()).unwrap_err();
+    assert!(matches!(error, Error::Status { status: 404, .. }));
+}
+
+#[test]
+fn cached_replies_skip_the_api_and_errors_are_not_cached() {
+    let dir = std::env::temp_dir().join(format!("luma-search-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cache = DiskCache::new(dir.clone(), crate::search_cache::DEFAULT_LIMIT);
+    let calls = std::cell::Cell::new(0);
+    let fetch = || {
+        calls.set(calls.get() + 1);
+        Ok(vec!["Ghostbusters".to_owned()])
+    };
+    let day = std::time::Duration::from_secs(86_400);
+    assert_eq!(cached(&cache, "k", day, fetch).unwrap(), ["Ghostbusters"]);
+    assert_eq!(cached(&cache, "k", day, fetch).unwrap(), ["Ghostbusters"]);
+    assert_eq!(calls.get(), 1);
+    let failing = || -> Result<Vec<String>, Error> { Err(Error::Network("down".into())) };
+    assert!(cached(&cache, "e", day, failing).is_err());
+    assert!(cached(&cache, "e", day, || Ok(vec!["now".to_owned()])).is_ok());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn generated_types_survive_the_cache_round_trip() {
+    let source = Fixtures::default();
+    let shows = source.search("ghostbusters", "us").unwrap();
+    let movie = source.movie(620).unwrap();
+    let shows_again: Vec<Show> =
+        serde_json::from_slice(&serde_json::to_vec(&shows).unwrap()).unwrap();
+    let movie_again: MovieDetailsResponse =
+        serde_json::from_slice(&serde_json::to_vec(&movie).unwrap()).unwrap();
+    assert_eq!(shows_again, shows);
+    assert_eq!(movie_again, movie);
+}
+
+fn titles(results: &[Ranked]) -> Vec<&str> {
+    results.iter().map(|r| r.show.title.as_str()).collect()
+}
+
+#[test]
+fn fan_lists_only_titles_with_fan_in_them() {
+    let source = Fixtures::default();
+    let results = search(&source, "fan", "us", &Services::default()).unwrap();
+    let titles = titles(&results);
+    // Movie of the Night pads its 20 results with titles that match in other languages.
+    for gone in [
+        "One Piece",
+        "Shin Ultraman",
+        "Rumble in the Bronx",
+        "Zack and Miri Make a Porno",
+    ] {
+        assert!(!titles.contains(&gone), "{gone}: {titles:#?}");
+    }
+    assert!(!titles.is_empty());
+    for title in &titles {
+        assert!(title.to_lowercase().contains("fan"), "{titles:#?}");
+    }
+}
+
+#[test]
+fn super_drops_titles_that_do_not_say_super() {
+    let source = Fixtures::default();
+    let results = search(&source, "super", "us", &Services::default()).unwrap();
+    let titles = titles(&results);
+    for gone in [
+        "8MM",
+        "The Bad Guys 2",
+        "Dog Man",
+        "Argylle",
+        "Sonic the Hedgehog 3",
+    ] {
+        assert!(!titles.contains(&gone), "{gone}: {titles:#?}");
+    }
+    for kept in ["Superman", "Super 8", "Superbad"] {
+        assert!(titles.contains(&kept), "{kept}: {titles:#?}");
+    }
+}
+
+#[test]
+fn star_wars_keeps_the_franchise_titles_that_do_not_say_star_wars() {
+    let source = Fixtures::default();
+    let results = search(&source, "star wars", "us", &Services::default()).unwrap();
+    let titles = titles(&results);
+    // Their US titles say "Star Wars: Andor", "Star Wars: The Mandalorian"…; Return of the Jedi
+    // is in the Star Wars collection.
+    for kept in [
+        "Andor",
+        "The Mandalorian",
+        "The Acolyte",
+        "Ahsoka",
+        "The Book of Boba Fett",
+        "Return of the Jedi",
+    ] {
+        assert!(titles.contains(&kept), "{kept}: {titles:#?}");
+    }
+    // Return of the Jedi came with the title search, so expanding the franchise does not
+    // fetch it again: the four lookups go to the films the search missed, The Force Awakens
+    // among them.
+    assert_eq!(
+        source.calls("streaming/show-"),
+        [
+            "streaming/show-movie-140607",
+            "streaming/show-movie-1891",
+            "streaming/show-movie-1893",
+            "streaming/show-movie-1895",
+        ]
+    );
+}
+
+#[test]
+fn when_nothing_matches_the_near_misses_stay() {
+    // Only the "sup" results that do not contain "sup" in any of their names.
+    let source = Fixtures::default();
+    let all = search(&source, "sup", "us", &Services::default()).unwrap();
+    let near_misses: Vec<Show> = Fixtures::default()
+        .search("sup", "us")
+        .unwrap()
+        .into_iter()
+        .filter(|show| !all.iter().any(|r| r.show.tmdb_id == show.tmdb_id))
+        .collect();
+    assert!(!near_misses.is_empty());
+    let mut enrichment = relevance::Enrichment::default();
+    for show in &near_misses {
+        match relevance::tmdb_id(show) {
+            Some((Kind::Movie, id)) => {
+                if let Ok(details) = source.movie(id) {
+                    enrichment.add_movie(&details);
+                }
+            }
+            Some((Kind::Series, id)) => {
+                if let Ok(details) = source.series(id) {
+                    enrichment.add_series(&details);
+                }
+            }
+            None => {}
+        }
+    }
+    let ranked = relevance::rank(
+        "sup",
+        &near_misses,
+        "us",
+        &Services::default(),
+        Some(&enrichment),
+    );
+    let kept = near_misses
+        .iter()
+        .filter(|show| {
+            enrichment
+                .signals
+                .get(&relevance::tmdb_id(show).unwrap())
+                .is_some_and(|s| s.keep(relevance::tmdb_id(show).unwrap().0, false))
+        })
+        .count();
+    assert_eq!(ranked.len(), kept, "nothing dropped for not matching");
+}
+
+#[test]
+fn half_a_word_is_completed_before_the_metered_search() {
+    let source = Fixtures::default();
+    let typed = search(&source, "ghostb", "us", &Services::default()).unwrap();
+    // TMDB's free search says "ghostb" can only become "ghostbusters"; Movie of the Night is
+    // asked for that, never for the half word.
+    assert_eq!(
+        source.calls("streaming/search-"),
+        ["streaming/search-title-ghostbusters"]
+    );
+    // The results are those of the whole word, so they do not move as the rest is typed.
+    let whole = search(
+        &Fixtures::default(),
+        "ghostbusters",
+        "us",
+        &Services::default(),
+    )
+    .unwrap();
+    assert_eq!(ids(&typed), ids(&whole));
+    assert_eq!(ids(&typed)[0], "movie/620");
+
+    let source = Fixtures::default();
+    search(&source, "star w", "us", &Services::default()).unwrap();
+    assert_eq!(
+        source.calls("streaming/search-"),
+        ["streaming/search-title-star-wars"]
+    );
+}
+
+#[test]
+fn text_that_could_become_several_words_is_searched_as_typed() {
+    let tmdb = |query: &str| Fixtures::default().tmdb_search(query).unwrap().unwrap();
+    // Ghost, Ghosts and Ghostbusters all start with "gho".
+    assert_eq!(relevance::complete("gho", &tmdb("gho")), None);
+    // Already a whole word of well-known titles.
+    assert_eq!(relevance::complete("super", &tmdb("super")), None);
+    assert_eq!(relevance::complete("fan", &tmdb("fan")), None);
+    assert_eq!(relevance::complete("star wars", &tmdb("star wars")), None);
+    // No well-known title starts a word with "sup" on TMDB's first page.
+    assert_eq!(relevance::complete("sup", &tmdb("sup")), None);
+    // Punctuation ends the word.
+    assert_eq!(relevance::complete("ghostb:", &tmdb("ghostb")), None);
+    assert_eq!(
+        relevance::complete("ghostb", &tmdb("ghostb")).as_deref(),
+        Some("ghostbusters")
+    );
+}
+
+#[test]
+fn a_search_typed_past_stops_before_its_next_call() {
+    let source = Fixtures::default();
+    // Typed past before the metered search: nothing is asked of Movie of the Night.
+    assert!(search_while(&source, "star wars", "us", &Services::default(), &|| false).is_none());
+    assert!(source.calls("streaming/").is_empty());
+
+    // Typed past once the title search has answered: no details, no franchise lookups.
+    let source = Fixtures::default();
+    let wanted = || source.calls("streaming/search-").is_empty();
+    assert!(search_while(&source, "star wars", "us", &Services::default(), &wanted).is_none());
+    assert!(source.calls("streaming/show-").is_empty());
+    assert!(source.calls("tmdb/movie-").is_empty());
+}
+
+#[test]
+fn work_runs_on_a_few_threads_and_keeps_its_order() {
+    let running = AtomicUsize::new(0);
+    let most = AtomicUsize::new(0);
+    let items: Vec<usize> = (0..20).collect();
+    let doubled = parallel(&items, 3, |&item| {
+        let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+        most.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        running.fetch_sub(1, Ordering::SeqCst);
+        item * 2
+    });
+    assert_eq!(
+        doubled,
+        items.iter().map(|item| Some(item * 2)).collect::<Vec<_>>()
+    );
+    assert!(most.load(Ordering::SeqCst) <= 3);
+    assert!(parallel(&[] as &[usize], 3, |&item| item).is_empty());
+}

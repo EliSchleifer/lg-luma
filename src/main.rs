@@ -5,8 +5,14 @@ mod app_artwork;
 #[path = "app-subscription.rs"]
 mod app_subscription;
 mod branding;
+mod cameras;
+mod clock;
 mod companion;
+mod criterion;
+#[path = "criterion-account.rs"]
+mod criterion_account;
 mod damage;
+mod deeplink;
 mod diagnostics;
 mod egl_damage;
 mod font;
@@ -14,21 +20,48 @@ mod home_assistant;
 mod i18n;
 #[path = "input-refresh.rs"]
 mod input_refresh;
+#[path = "key-editor.rs"]
+mod key_editor;
+mod live;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
 mod luna;
+mod mdblist;
 mod model;
 mod platform;
+mod posters;
 mod raster;
 mod recents;
 mod renderer;
 #[path = "scroll-preview.rs"]
 mod scroll_preview;
 mod sdl_events;
+#[path = "signal-watch.rs"]
+mod signal_watch;
 mod state;
 mod storage;
+mod telemetry;
+// Generated from the whole OpenAPI spec; search uses only part of it.
+#[allow(dead_code)]
+#[path = "motn-api.rs"]
+mod motn_api;
+// Generated from the whole OpenAPI spec; search uses only part of it.
+#[allow(dead_code)]
+mod openapi;
+mod relevance;
+#[path = "search-cache.rs"]
+mod search_cache;
+mod streaming;
+#[path = "streaming-keys.rs"]
+mod streaming_keys;
+#[path = "streaming-search.rs"]
+mod streaming_search;
 mod text_rendering;
 #[path = "tile-editor.rs"]
 mod tile_editor;
+// Generated from the whole OpenAPI spec; search uses only part of it.
+#[allow(dead_code)]
+#[path = "tmdb-api.rs"]
+mod tmdb_api;
 mod update;
 mod vector;
 mod view;
@@ -114,7 +147,7 @@ impl Options {
         while let Some(arg) = args.next() {
             if arg == "--help" {
                 println!(
-                    "Luma native\n\n  --assets PATH       Generated artwork directory\n  --preferences PATH  Isolated preferences file\n  --fullscreen        Fullscreen desktop preview\n  --resolution SIZE   Request 1080p, 4k, or WIDTHxHEIGHT; verify actual drawable\n  --frames N          Exit after N event-loop frames\n  --profile-frames N  Force N presentations (20+) and report pacing after warmup\n  --script ACTIONS    Comma-separated home/apps/settings/up/down/left/right/enter/back/menu/hold/type:TEXT/click:X:Y/wait\n  --time RFC3339      Fix the preview's clock and date\n  --screenshot PATH   Save an offscreen PNG\n  --capture-scale N   Capture at 1x/1080p (default) or 2x/4k\n  --diagnostics PATH  Save actual drawable, GPU, font-cache and timing information\n  --dump-state PATH   Save final UI state as JSON\n\nCompile with --features webos for the TV backend. Desktop builds never call TV services."
+                    "Luma native\n\n  --assets PATH       Generated artwork directory\n  --preferences PATH  Isolated preferences file\n  --fullscreen        Fullscreen desktop preview\n  --resolution SIZE   Request 1080p, 4k, or WIDTHxHEIGHT; verify actual drawable\n  --frames N          Exit after N event-loop frames\n  --profile-frames N  Force N presentations (20+) and report pacing after warmup\n  --script ACTIONS    Comma-separated home/apps/settings/up/down/left/right/enter/back/menu/hold/cameras/await-cameras/type:TEXT/click:X:Y/wait\n  --time RFC3339      Fix the preview's clock and date\n  --screenshot PATH   Save an offscreen PNG\n  --capture-scale N   Capture at 1x/1080p (default) or 2x/4k\n  --diagnostics PATH  Save actual drawable, GPU, font-cache and timing information\n  --dump-state PATH   Save final UI state as JSON\n\nCompile with --features webos for the TV backend. Desktop builds never call TV services."
                 );
                 println!(
                     "\n  --test-extra-apps N  Explicit scroll preview with up to 300 non-launchable extra cards; separate preferences"
@@ -211,6 +244,24 @@ struct Press {
 
 const SCRIPT_POINTER: u32 = u32::MAX - 1;
 // SDL-webOS's Back scancode is outside rust-sdl2's standard Scancode enum.
+// SDL_SCANCODE_TO_KEYCODE of SDL_SCANCODE_AUDIOREWIND and SDL_SCANCODE_AUDIOFASTFORWARD, which
+// rust-sdl2 does not name.
+const AUDIO_REWIND_KEYCODE: i32 = (1 << 30) | 285;
+const AUDIO_FAST_FORWARD_KEYCODE: i32 = (1 << 30) | 286;
+
+fn media_key(key: Keycode) -> Option<cameras::Media> {
+    Some(match key {
+        Keycode::AudioPlay => cameras::Media::Play,
+        Keycode::Pause | Keycode::AudioStop => cameras::Media::Pause,
+        Keycode::Space => cameras::Media::PlayPause,
+        Keycode::Comma => cameras::Media::Rewind,
+        Keycode::Period => cameras::Media::Forward,
+        key if i32::from(key) == AUDIO_REWIND_KEYCODE => cameras::Media::Rewind,
+        key if i32::from(key) == AUDIO_FAST_FORWARD_KEYCODE => cameras::Media::Forward,
+        _ => return None,
+    })
+}
+
 // Keycode retains the raw value: SDL_SCANCODE_TO_KEYCODE(SDL_SCANCODE_WEBOS_BACK).
 const WEBOS_BACK_KEYCODE: i32 = (1 << 30) | 482;
 
@@ -306,7 +357,7 @@ fn effects(
         match effect {
             Effect::Save => {
                 if let Err(error) = storage::save(preferences, &state.preferences) {
-                    eprintln!("{error}");
+                    crate::telemetry::log_error!("preferences", "{error}");
                     state.notify(state.preferences.language.t("savedError"));
                 } else {
                     platform.sync_splash(state.preferences.splash_background());
@@ -320,6 +371,11 @@ fn effects(
                     platform.send(Request::Refresh);
                 }
             }
+            Effect::ReclaimHome => platform.send(Request::ReclaimHome),
+            Effect::Launch(id) if id == model::CAMERAS_APP => {
+                state.show_cameras = true;
+            }
+            Effect::Launch(id) if id == criterion::APP => state.open_criterion(),
             Effect::Launch(id) => {
                 if scroll_preview::is_placeholder(&id) {
                     state.notify(state.preferences.language.t("scrollTestOnly"));
@@ -328,6 +384,7 @@ fn effects(
                 if !state.launching {
                     if platform.webos {
                         state.launching = true;
+                        state.launch_requested = Some(id.clone());
                         state.notify(state.preferences.language.t("opening"));
                         platform.send(Request::Launch(id));
                     } else {
@@ -344,6 +401,42 @@ fn effects(
                                 .format("desktopPreview", &[("app", title)]),
                         );
                     }
+                }
+            }
+            Effect::LaunchTitle { app, service, link } => {
+                if state.launching {
+                    continue;
+                }
+                if platform.webos {
+                    state.launching = true;
+                    state.launch_requested = Some(app.clone());
+                    state.notify(state.preferences.language.t("opening"));
+                    platform.send(Request::LaunchTitle {
+                        id: app,
+                        service,
+                        link,
+                    });
+                } else {
+                    // The desktop preview never fetches a title's page.
+                    eprintln!(
+                        "Luma desktop preview: would open {app} with {}",
+                        crate::deeplink::launch(&service, &link).map_or_else(
+                            || format!("{service} link {link}"),
+                            |l| l.params.to_string()
+                        )
+                    );
+                    let title = state
+                        .inventory
+                        .apps
+                        .iter()
+                        .find(|a| a.id == app)
+                        .map_or(app.as_str(), |app| app.title.as_str());
+                    state.notify(
+                        state
+                            .preferences
+                            .language
+                            .format("desktopPreview", &[("app", title)]),
+                    );
                 }
             }
             Effect::FireWebhook(tile) => webhook.send(tile),
@@ -382,6 +475,10 @@ fn script(
             state.open(1);
             vec![]
         }
+        "search" => {
+            state.open(state::SEARCH_TAB);
+            vec![]
+        }
         "settings" => {
             state.open(2);
             vec![]
@@ -393,6 +490,8 @@ fn script(
         "enter" => state.activate(),
         "back" => state.back(),
         "recents" | "hold-back" => state.open_recents(),
+        "cameras" => vec![Effect::Launch(model::CAMERAS_APP.into())],
+        "criterion" => vec![Effect::Launch(criterion::APP.into())],
         "menu" => {
             state.options();
             vec![]
@@ -410,6 +509,7 @@ fn script(
                     Some(state::Subpage::Greeting) => state::TextField::Name,
                     Some(state::Subpage::WeatherLocation) => state::TextField::Location,
                     Some(state::Subpage::Input(_)) => state::TextField::InputName,
+                    _ if state.page == state::Page::Search => state::TextField::Titles,
                     _ => state::TextField::Apps,
                 }
             };
@@ -420,10 +520,12 @@ fn script(
             vec![]
         }
         "await-search" => vec![],
+        "await-titles" => vec![],
         "await-weather" => vec![],
         "await-recents" => vec![],
         "await-upload" => vec![],
         "await-tile-editor" => vec![],
+        "await-cameras" => vec![],
         _ => return Err(format!("Unknown scripted action: {action}")),
     })
 }
@@ -459,7 +561,7 @@ fn wallpaper_upload_active(state: &State, webos: bool, focused: bool, visible: b
 /// only: the card still shows the console for this session.
 fn save_remembered_inputs(state: &State, preferences: &std::path::Path) {
     if let Err(error) = storage::save(preferences, &state.preferences) {
-        eprintln!("{error}");
+        crate::telemetry::log_error!("preferences", "{error}");
     }
 }
 
@@ -597,8 +699,9 @@ fn run() -> Result<(), String> {
     let webos = cfg!(feature = "webos");
     let startup_stage = |stage: &str| {
         if webos {
-            eprintln!(
-                "Luma startup: {stage} after {} ms",
+            crate::telemetry::log_info!(
+                "startup",
+                "{stage} after {} ms",
                 startup.elapsed().as_millis()
             );
         }
@@ -622,7 +725,7 @@ fn run() -> Result<(), String> {
             std::env::set_var("APPID", surface_id);
             std::env::set_var("SDL_VIDEO_WAYLAND_WMCLASS", surface_id);
         }
-        eprintln!("Luma webOS surface: {surface_id}");
+        crate::telemetry::log_info!("startup", "webOS surface: {surface_id}");
         sdl2::hint::set("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
         // Magic Remotes send the separate Exit key for a long Back press.
         // Claim it before video init so the compositor does not close Luma.
@@ -678,12 +781,15 @@ fn run() -> Result<(), String> {
         options.test_update_version.is_some(),
     );
     let mut state = State::new(initial_preferences);
+    // Before the first check, which the update service makes as it starts.
+    update::set_nightly(state.preferences.nightly_updates);
     if let Some(version) = &options.test_update_version {
         eprintln!(
             "Luma update preview: simulated version {version}; public release check disabled"
         );
         state.available_update = (version != env!("CARGO_PKG_VERSION")).then(|| version.clone());
         state.update_status = update::Status::Checked;
+        state.update_checked = Some(state::unix_now());
     } else if public_update_checks {
         state.update_status = update::Status::Checking;
     }
@@ -691,6 +797,31 @@ fn run() -> Result<(), String> {
     let mut wallpaper_service =
         wallpapers::Service::new(&preferences_path, !webos && !options.script.is_empty())?;
     let mut tile_editor_service = tile_editor::Service::new(!webos && !options.script.is_empty())?;
+    let keys_path = streaming_keys::path(&preferences_path);
+    state.streaming_keys = streaming_keys::load(&keys_path).status();
+    let streaming_search = streaming_search::Service::new(
+        keys_path.clone(),
+        search_cache::DiskCache::beside(&preferences_path),
+    );
+    let posters = posters::Service::new(search_cache::DiskCache::posters_beside(&preferences_path));
+    let criterion_catalog = criterion::Service::new(
+        search_cache::DiskCache::new(
+            preferences_path.with_file_name("criterion-cache"),
+            8 * 1024 * 1024,
+        ),
+        Some(keys_path.clone()),
+    );
+    let criterion_images = posters::Service::new(search_cache::DiskCache::new(
+        preferences_path.with_file_name("criterion-images"),
+        search_cache::POSTER_LIMIT,
+    ));
+    let mut search_was_open = false;
+    let scores = mdblist::Service::new(
+        mdblist::Live::new(keys_path.clone()),
+        search_cache::DiskCache::beside(&preferences_path),
+    );
+    let mut key_editor_service =
+        key_editor::Service::new(keys_path, !webos && !options.script.is_empty())?;
     if options.test_extra_apps > 0 {
         eprintln!(
             "Luma scroll preview: explicit {}-app expansion; preferences {}",
@@ -701,6 +832,7 @@ fn run() -> Result<(), String> {
     if webos && options.weather_test_server.is_some() {
         return Err("Weather test servers are only available in desktop builds".into());
     }
+    telemetry::start(preferences_path.parent());
     let weather_cache = weather_service::cache_path(&preferences_path);
     state.weather.cache = weather_service::load_cache(&weather_cache);
     let weather_service = weather_service::Service::new(
@@ -712,8 +844,16 @@ fn run() -> Result<(), String> {
         webos,
         options.preferences.is_none() && options.test_extra_apps == 0,
     );
+    if webos && !options.webos_home && state.preferences.luma_home {
+        platform.send(Request::ReclaimHome);
+    }
     let webhook_service = webhook::Service::new();
     // Pairings sit beside the preferences; a temporary --preferences profile keeps its own.
+    let mut camera_service = cameras::Service::default();
+    let mut cameras_asked: Option<Instant> = None;
+    // The enlarged camera's own video on the TV's decoder, and the camera it is for.
+    let mut camera_live: Option<(String, live::Live)> = None;
+    state.cameras.decoder = webos && live::available();
     let mut home_assistant = home_assistant::Service::new(
         home_assistant::Live { webos },
         Some(preferences_path.with_file_name("home-assistant.json")),
@@ -749,7 +889,11 @@ fn run() -> Result<(), String> {
             std::env::var_os("WAYLAND_DISPLAY"),
         )
     })?;
-    eprintln!("Luma SDL video driver: {}", video.current_video_driver());
+    crate::telemetry::log_info!(
+        "startup",
+        "SDL video driver: {}",
+        video.current_video_driver()
+    );
     startup_stage("SDL video");
     let attributes = video.gl_attr();
     if webos {
@@ -790,9 +934,11 @@ fn run() -> Result<(), String> {
         std::env::var("LUMA_MSAA").ok().as_deref(),
         std::env::var("LUMA_EMBOLDEN").ok().as_deref(),
     );
-    eprintln!(
-        "Luma text rendering: {:?}, embolden {} px",
-        text_config.mode, text_config.embolden
+    crate::telemetry::log_info!(
+        "startup",
+        "text rendering: {:?}, embolden {} px",
+        text_config.mode,
+        text_config.embolden
     );
     for &samples in text_config.sample_counts {
         attributes.set_multisample_buffers(u8::from(samples > 0));
@@ -812,10 +958,10 @@ fn run() -> Result<(), String> {
     }
     let mut samples = 0;
     unsafe { gl::GetIntegerv(gl::SAMPLES, &mut samples) };
-    eprintln!("Luma GL multisampling: {samples} samples");
+    crate::telemetry::log_info!("startup", "GL multisampling: {samples} samples");
     startup_stage("window and GL context");
     if let Err(error) = video.gl_set_swap_interval(1) {
-        eprintln!("VSync: {error}");
+        crate::telemetry::log_warn!("startup", "VSync: {error}");
     }
     let mut renderer =
         renderer::Renderer::new(&assets.root.join("font.ttf"), webos, text_config.embolden)?;
@@ -824,8 +970,9 @@ fn run() -> Result<(), String> {
     let partial = (std::env::var("LUMA_PARTIAL").as_deref() != Ok("0"))
         .then(egl_damage::PartialUpdate::load)
         .flatten();
-    eprintln!(
-        "Luma partial redraw: {}",
+    crate::telemetry::log_info!(
+        "startup",
+        "partial redraw: {}",
         partial
             .as_ref()
             .map_or("off", egl_damage::PartialUpdate::describe)
@@ -852,111 +999,120 @@ fn run() -> Result<(), String> {
     #[cfg(not(all(feature = "webos", target_os = "linux", target_arch = "arm")))]
     let (lifecycle_event, end_registration): (Option<u32>, Option<EndRegistration>) = (None, None);
     #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
-    let (lifecycle_event, end_registration): (Option<u32>, Option<EndRegistration>) =
-        if webos && options.webos_home {
-            let subsystem = sdl.event()?;
-            // SAFETY: registers one SDL user event type before any are pushed.
-            let event_type = unsafe { subsystem.register_event()? };
-            let pusher = move |sender: sdl2::event::EventSender| {
-                move |lifecycle: platform::Lifecycle| {
-                    let code = match lifecycle {
-                        platform::Lifecycle::Relaunch => 1,
-                        platform::Lifecycle::Close => 2,
-                    };
-                    let _ = sender.push_event(Event::User {
-                        timestamp: 0,
-                        window_id: 0,
-                        type_: event_type,
-                        code,
-                        data1: std::ptr::null_mut(),
-                        data2: std::ptr::null_mut(),
-                    });
-                }
-            };
-            // SAFETY: geteuid has no preconditions.
-            let as_root = unsafe { libc::geteuid() } == 0;
-            if platform::runs_as_lg_home() {
-                // In place of LG's Home executable (webOS 5/6), LG's role is bound to that path,
-                // so Luma registers through lifecycle v2 on its own connection.
-                let push = pusher(subsystem.event_sender());
-                luna::subscribe(
-                    Some(platform::home_id()),
-                    "luna://com.webos.applicationManager/registerApp",
-                    &serde_json::json!({"id": platform::home_id()}),
-                    // sam answers "registered" at once; without it sam would end Home later.
-                    Duration::from_secs(10),
-                    move |message| {
-                        eprintln!("Luma lifecycle: {message}");
-                        let refused = message
-                            .get("returnValue")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(false);
-                        match platform::Lifecycle::from_reply(&message) {
-                            Some(lifecycle) => push(lifecycle),
-                            // Registration lost (e.g. sam restarted): quit, so sam starts Home
-                            // afresh.
-                            None if refused => push(platform::Lifecycle::Close),
-                            None => {}
-                        }
-                    },
-                )?;
-                (Some(event_type), None)
-            } else if !as_root {
-                (None, None)
-            } else if std::path::Path::new(platform::HOME_LIFECYCLE_OFF).exists() {
-                eprintln!(
-                    "Luma lifecycle: {} exists; Home stays unregistered",
-                    platform::HOME_LIFECYCLE_OFF
-                );
-                (None, None)
-            } else {
-                // A staged Home manifest (webOS 10/11) runs Luma's own executable as root under
-                // LG's app-ID based Home role, which Luma's connection cannot claim. Hold the
-                // registration as that app through `luna-send -a`; sam then expects lifecycle v1.
-                // This does not wait for sam: until it answers, Home is simply unregistered.
-                let push = pusher(subsystem.event_sender());
-                let close = pusher(subsystem.event_sender());
-                match luna::subscribe_as_app(
-                    platform::home_id(),
-                    "luna://com.webos.applicationManager/registerNativeApp",
-                    &serde_json::json!({}),
-                    Duration::from_secs(10),
-                    move |message| {
-                        eprintln!("Luma lifecycle: {message}");
-                        if let Some(lifecycle) = platform::Lifecycle::from_reply(&message) {
-                            push(lifecycle);
-                        }
-                    },
-                    // A registration sam had accepted is gone: quit, so sam starts Home afresh.
-                    // Never accepted: stay, unregistered, as before.
-                    move |registered| {
-                        if registered {
-                            close(platform::Lifecycle::Close);
-                        }
-                    },
-                ) {
-                    Ok(subscription) => (
-                        Some(event_type),
-                        Some(Box::new(move || subscription.end()) as EndRegistration),
-                    ),
-                    Err(error) => {
-                        eprintln!("Luma lifecycle: {error}; Home stays unregistered");
-                        (None, None)
+    let (lifecycle_event, end_registration): (Option<u32>, Option<EndRegistration>) = if webos
+        && options.webos_home
+    {
+        let subsystem = sdl.event()?;
+        // SAFETY: registers one SDL user event type before any are pushed.
+        let event_type = unsafe { subsystem.register_event()? };
+        let pusher = move |sender: sdl2::event::EventSender| {
+            move |lifecycle: platform::Lifecycle| {
+                let code = match lifecycle {
+                    platform::Lifecycle::Relaunch => 1,
+                    platform::Lifecycle::Close => 2,
+                };
+                let _ = sender.push_event(Event::User {
+                    timestamp: 0,
+                    window_id: 0,
+                    type_: event_type,
+                    code,
+                    data1: std::ptr::null_mut(),
+                    data2: std::ptr::null_mut(),
+                });
+            }
+        };
+        // SAFETY: geteuid has no preconditions.
+        let as_root = unsafe { libc::geteuid() } == 0;
+        if platform::runs_as_lg_home() {
+            // In place of LG's Home executable (webOS 5/6), LG's role is bound to that path,
+            // so Luma registers through lifecycle v2 on its own connection.
+            let push = pusher(subsystem.event_sender());
+            luna::subscribe(
+                Some(platform::home_id()),
+                "luna://com.webos.applicationManager/registerApp",
+                &serde_json::json!({"id": platform::home_id()}),
+                // sam answers "registered" at once; without it sam would end Home later.
+                Duration::from_secs(10),
+                move |message| {
+                    crate::telemetry::log_info!("lifecycle", "{message}");
+                    let refused = message
+                        .get("returnValue")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(false);
+                    match platform::Lifecycle::from_reply(&message) {
+                        Some(lifecycle) => push(lifecycle),
+                        // Registration lost (e.g. sam restarted): quit, so sam starts Home
+                        // afresh.
+                        None if refused => push(platform::Lifecycle::Close),
+                        None => {}
                     }
+                },
+            )?;
+            (Some(event_type), None)
+        } else if !as_root {
+            (None, None)
+        } else if std::path::Path::new(platform::HOME_LIFECYCLE_OFF).exists() {
+            crate::telemetry::log_info!(
+                "lifecycle",
+                "{} exists; Home stays unregistered",
+                platform::HOME_LIFECYCLE_OFF
+            );
+            (None, None)
+        } else {
+            // A staged Home manifest (webOS 10/11) runs Luma's own executable as root under
+            // LG's app-ID based Home role, which Luma's connection cannot claim. Hold the
+            // registration as that app through `luna-send -a`; sam then expects lifecycle v1.
+            // This does not wait for sam: until it answers, Home is simply unregistered.
+            let push = pusher(subsystem.event_sender());
+            let close = pusher(subsystem.event_sender());
+            match luna::subscribe_as_app(
+                platform::home_id(),
+                "luna://com.webos.applicationManager/registerNativeApp",
+                &serde_json::json!({}),
+                Duration::from_secs(10),
+                move |message| {
+                    crate::telemetry::log_info!("lifecycle", "{message}");
+                    if let Some(lifecycle) = platform::Lifecycle::from_reply(&message) {
+                        push(lifecycle);
+                    }
+                },
+                // A registration sam had accepted is gone: quit, so sam starts Home afresh.
+                // Never accepted: stay, unregistered, as before.
+                move |registered| {
+                    if registered {
+                        close(platform::Lifecycle::Close);
+                    }
+                },
+            ) {
+                Ok(subscription) => (
+                    Some(event_type),
+                    Some(Box::new(move || subscription.end()) as EndRegistration),
+                ),
+                Err(error) => {
+                    crate::telemetry::log_warn!("lifecycle", "{error}; Home stays unregistered");
+                    (None, None)
                 }
             }
-        } else {
-            (None, None)
-        };
+        }
+    } else {
+        (None, None)
+    };
     // Whether a staged Home's relaunch reached the front; see platform::ForegroundCheck.
     let mut foreground = platform::ForegroundCheck::default();
     let mut focused = true;
     let mut press: Option<Press> = None;
     let mut back_button = BackButton::default();
-    let initial_nav = view::navigation(&assets, state.preferences.language);
+    let initial_nav = view::navigation(
+        &assets,
+        state.preferences.language,
+        state.page == state::Page::Search,
+    );
     let mut pill = initial_nav.items[0].x;
     let mut pill_width = initial_nav.items[0].w;
-    let mut last_frame = Instant::now();
+    if options.frames.is_some() {
+        clock::use_fixed_step();
+    }
+    let mut last_frame = clock::now();
     let mut last_minute = None;
     let mut frame = 0u64;
     let mut visible = true;
@@ -970,6 +1126,7 @@ fn run() -> Result<(), String> {
     // When to ask for the inventory again after a failed load (State::inventory_failed).
     let mut inventory_retry: Option<Instant> = None;
     let mut input_refresh = input_refresh::Refresh::default();
+    let mut signal_watch = signal_watch::Watch::default();
     let scripted_input = !options.script.is_empty();
     let mut scene = compose(
         &mut state,
@@ -1006,7 +1163,7 @@ fn run() -> Result<(), String> {
                         && matches!(state.overlay, Some(Overlay::WallpaperUpload)) =>
                 {
                     if let Err(error) = &result {
-                        eprintln!("Luma wallpaper upload: {error}");
+                        crate::telemetry::log_warn!("wallpapers", "upload: {error}");
                     }
                     state.wallpaper_upload = Some(result);
                     state.dirty = true;
@@ -1047,7 +1204,7 @@ fn run() -> Result<(), String> {
                         && matches!(state.overlay, Some(Overlay::TileEditor)) =>
                 {
                     if let Err(error) = &result {
-                        eprintln!("Luma tile editor: {error}");
+                        crate::telemetry::log_warn!("tile-editor", "{error}");
                     }
                     state.tile_editor = Some(result);
                     state.dirty = true;
@@ -1058,6 +1215,37 @@ fn run() -> Result<(), String> {
                 {
                     state.back();
                     state.notify(state.preferences.language.t("tileEditorEnded"));
+                }
+                _ => {}
+            }
+        }
+        key_editor_service.set_active(
+            focused && visible && matches!(state.overlay, Some(Overlay::StreamingKeys)),
+        );
+        while let Ok(event) = key_editor_service.receiver.try_recv() {
+            match event {
+                // Applied even after the dialog closed: the phone was already told it saved.
+                key_editor::Event::Saved(status) => {
+                    state.streaming_keys = status;
+                    state.notify(state.preferences.language.t("streamingKeysSaved"));
+                    state.dirty = true;
+                }
+                key_editor::Event::Session(generation, result)
+                    if generation == key_editor_service.generation()
+                        && matches!(state.overlay, Some(Overlay::StreamingKeys)) =>
+                {
+                    if let Err(error) = &result {
+                        crate::telemetry::log_warn!("key-editor", "{error}");
+                    }
+                    state.key_editor = Some(result);
+                    state.dirty = true;
+                }
+                key_editor::Event::Ended(generation)
+                    if generation == key_editor_service.generation()
+                        && matches!(state.overlay, Some(Overlay::StreamingKeys)) =>
+                {
+                    state.back();
+                    state.notify(state.preferences.language.t("streamingKeysEnded"));
                 }
                 _ => {}
             }
@@ -1088,7 +1276,7 @@ fn run() -> Result<(), String> {
                 startup_cycle_pending = false;
             }
             if cycled && let Err(error) = storage::save(&preferences_path, &state.preferences) {
-                eprintln!("{error}");
+                crate::telemetry::log_error!("preferences", "{error}");
             }
         }
         while let Ok(response) = updates.receiver.try_recv() {
@@ -1134,8 +1322,9 @@ fn run() -> Result<(), String> {
                 }
                 Response::Inventory(Err(error)) => {
                     if let Some(delay) = state.inventory_failed(error) {
-                        eprintln!(
-                            "Luma TV inventory: retry {} in {} s",
+                        crate::telemetry::log_warn!(
+                            "inventory",
+                            "retry {} in {} s",
                             state.inventory_failures,
                             delay.as_secs()
                         );
@@ -1147,21 +1336,35 @@ fn run() -> Result<(), String> {
                 }
                 Response::Inputs(result) => {
                     if let Err(error) = input_refresh.completed(Instant::now(), result) {
-                        eprintln!("Luma HDMI refresh: {error}");
+                        crate::telemetry::log_warn!("inputs", "HDMI refresh: {error}");
                     }
                 }
-                Response::Launched(result) => {
-                    state.launching = false;
-                    match result {
-                        Err(error) => {
-                            eprintln!("{error}");
-                            state.notify(state.preferences.language.t("appOpenError"));
-                        }
-                        Ok(()) => {
-                            state.notice = None;
-                            state.dirty = true;
-                        }
+                Response::Signal(result) => match signal_watch.completed(Instant::now(), result) {
+                    Ok(true) => {
+                        crate::telemetry::log_info!(
+                            "inputs",
+                            "the HDMI source in front lost its signal; going Home"
+                        );
+                        platform.send(Request::GoHome);
                     }
+                    Ok(false) => {}
+                    Err(error) => {
+                        crate::telemetry::log_warn!("inputs", "HDMI signal watch: {error}")
+                    }
+                },
+                Response::LaunchDropped => state.launch_dropped(),
+                Response::Launched(result) => {
+                    let pending = state.launch_response(result);
+                    running &= effects(
+                        pending,
+                        &mut state,
+                        &platform,
+                        &preferences_path,
+                        &weather_service,
+                        &wallpaper_service,
+                        &webhook_service,
+                        &updates,
+                    );
                 }
                 Response::Uninstalled { id, result } => {
                     let pending = state.uninstall_response(id, result);
@@ -1204,6 +1407,10 @@ fn run() -> Result<(), String> {
             }
         }
         home_assistant.set_enabled(state.preferences.home_assistant);
+        if std::mem::take(&mut state.show_cameras) {
+            home_assistant.show_cameras();
+            cameras_asked = Some(Instant::now());
+        }
         while let Ok(event) = home_assistant.events.try_recv() {
             let language = state.preferences.language;
             let notice = match event {
@@ -1214,17 +1421,140 @@ fn run() -> Result<(), String> {
                     continue;
                 }
                 home_assistant::Event::PairingCode(code) => {
-                    language.format("homeAssistantCode", &[("code", &code)])
+                    let notice = language.format("homeAssistantCode", &[("code", &code)]);
+                    if state.home_assistant_pairing(code) {
+                        continue;
+                    }
+                    notice
+                }
+                home_assistant::Event::PairingEnded => {
+                    state.home_assistant_pairing_ended();
+                    continue;
                 }
                 home_assistant::Event::Paired(name) => {
-                    language.format("homeAssistantPaired", &[("name", &name)])
+                    let notice = language.format("homeAssistantPaired", &[("name", &name)]);
+                    if state.home_assistant_paired_with(name) {
+                        continue;
+                    }
+                    notice
                 }
                 home_assistant::Event::Failed(error) => {
-                    eprintln!("Luma Home Assistant: {error}");
+                    crate::telemetry::log_error!("home-assistant", "{error}");
                     language.t("homeAssistantFailed").to_owned()
+                }
+                home_assistant::Event::Notice(key) => language.t(key).to_owned(),
+                home_assistant::Event::Cameras {
+                    cameras,
+                    live,
+                    open,
+                } => {
+                    state.camera_list(cameras, live, open);
+                    continue;
+                }
+                home_assistant::Event::VideoClosed(closed) => {
+                    state.camera_video_closed(closed);
+                    continue;
+                }
+                // Typed on a phone through Home Assistant's notification.
+                home_assistant::Event::Typed { text, submit } => {
+                    state.set_editing_text(&text);
+                    if submit {
+                        let pending = state.submit_text_input();
+                        running &= effects(
+                            pending,
+                            &mut state,
+                            &platform,
+                            &preferences_path,
+                            &weather_service,
+                            &wallpaper_service,
+                            &webhook_service,
+                            &updates,
+                        );
+                    }
+                    continue;
+                }
+                // Settings keeps naming them; a notice only for a server newly found outdated.
+                home_assistant::Event::IntegrationOutdated(names) => {
+                    let new: Vec<&str> = names
+                        .iter()
+                        .filter(|name| !state.home_assistant_outdated.contains(name))
+                        .map(String::as_str)
+                        .collect();
+                    let notice = (!new.is_empty()).then(|| {
+                        language.format("homeAssistantOutdated", &[("name", &new.join(", "))])
+                    });
+                    state.home_assistant_outdated = names;
+                    state.dirty = true;
+                    match notice {
+                        Some(notice) => notice,
+                        None => continue,
+                    }
+                }
+                // Sent only when the keys changed, so a reconnect does not repeat the notice.
+                home_assistant::Event::StreamingKeys(status) => {
+                    state.streaming_keys = status;
+                    state.dirty = true;
+                    language.t("streamingKeysSaved").to_owned()
                 }
             };
             state.notify(notice);
+        }
+        if !state.preferences.home_assistant && state.cameras_visible() {
+            state.close_cameras();
+        }
+        if let Some(arrangement) = state.cameras.save.take() {
+            home_assistant.arrange(arrangement);
+        }
+        // An enlarged camera's HLS video: ask Home Assistant to start it, then play it in the
+        // overlay app; close it when the gallery leaves the camera.
+        if let Some((id, endpoint)) = state.cameras.resolve.take() {
+            camera_service.resolve(id, endpoint);
+        }
+        // The camera's own video on the TV's decoder: loaded and unloaded on this thread, and
+        // not played while another app hides Luma.
+        if state.cameras_visible() {
+            state.cameras.seen(visible);
+        }
+        if std::mem::take(&mut state.cameras.stop_native) {
+            camera_live = None;
+        }
+        if let Some((id, url)) = state.cameras.start_native.take() {
+            // The earlier video unloads before the next one loads.
+            drop(camera_live.take());
+            camera_live = Some((id, live::Live::start(url)));
+        }
+        if let Some((id, video)) = &mut camera_live {
+            for event in video.poll() {
+                state.camera_native(id, event);
+            }
+        }
+        // The focused camera's video stream starts ahead of OK.
+        if let Some((id, endpoint)) = state.camera_warm(visible, Instant::now()) {
+            camera_service.warm(id, endpoint);
+        }
+        for (id, endpoint) in state.camera_relays(visible, Instant::now()) {
+            camera_service.warm(id, endpoint);
+        }
+        if let Some(video) = state.cameras.play.take() {
+            home_assistant.show_video(video);
+        }
+        if std::mem::take(&mut state.cameras.stop_video) {
+            home_assistant.close_video();
+        }
+        // Frames only while the gallery is open and on screen.
+        camera_service.sync(&state.camera_watches(visible));
+        for update in camera_service.receiver.try_iter() {
+            state.camera_update(update);
+        }
+        // A paused or rewound enlarged camera shows its picture from that moment: a frame it
+        // kept, or what UniFi Protect recorded.
+        if let Some((id, want)) =
+            state.camera_replay(camera_service.recorded(), Instant::now(), state::unix_now())
+        {
+            camera_service.replay(&id, want);
+        }
+        if let Some((id, url)) = state.cameras.fetch_marks.take() {
+            camera_service.marks(id, url);
         }
         while let Ok(webhook::Response::Done { title, result }) =
             webhook_service.receiver.try_recv()
@@ -1232,7 +1562,7 @@ fn run() -> Result<(), String> {
             let key = match result {
                 Ok(()) => "tileSent",
                 Err(error) => {
-                    eprintln!("Luma webhook {title}: {error}");
+                    crate::telemetry::log_warn!("webhook", "{title}: {error}");
                     "tileFailed"
                 }
             };
@@ -1337,12 +1667,17 @@ fn run() -> Result<(), String> {
                     WindowEvent::Hidden | WindowEvent::Minimized => {
                         if matches!(
                             state.overlay,
-                            Some(Overlay::WallpaperUpload | Overlay::TileEditor)
+                            Some(
+                                Overlay::WallpaperUpload
+                                    | Overlay::TileEditor
+                                    | Overlay::StreamingKeys
+                            )
                         ) {
                             state.back();
                         }
                         wallpaper_service.set_active(false);
                         tile_editor_service.set_active(false, &[]);
+                        key_editor_service.set_active(false);
                         visible = false;
                         focused = false;
                         press = None;
@@ -1351,17 +1686,23 @@ fn run() -> Result<(), String> {
                             pending = state.finish_text_input();
                         }
                         profile.pause();
+                        telemetry::frames_paused();
                     }
                     WindowEvent::FocusLost => {
                         if webos {
                             if matches!(
                                 state.overlay,
-                                Some(Overlay::WallpaperUpload | Overlay::TileEditor)
+                                Some(
+                                    Overlay::WallpaperUpload
+                                        | Overlay::TileEditor
+                                        | Overlay::StreamingKeys
+                                )
                             ) {
                                 state.back();
                             }
                             wallpaper_service.set_active(false);
                             tile_editor_service.set_active(false, &[]);
+                            key_editor_service.set_active(false);
                         }
                         focused = false;
                         press = None;
@@ -1442,7 +1783,7 @@ fn run() -> Result<(), String> {
                             if matches!(state.overlay, Some(Overlay::SystemKeyboard)) =>
                         {
                             press = None;
-                            pending = state.finish_text_input();
+                            pending = state.submit_text_input();
                         }
                         Keycode::Return | Keycode::KpEnter if !repeat => {
                             press = Some(Press {
@@ -1463,7 +1804,20 @@ fn run() -> Result<(), String> {
                             let length = state.editing_text().len() as i32;
                             state.delete_surrounding_text(-length, length);
                         }
-                        Keycode::M | Keycode::Menu if !repeat && state.overlay.is_none() => {
+                        // The remote's media keys (comma, period and space on a keyboard) on an
+                        // enlarged camera: rewind, fast-forward, play and pause.
+                        key if state.cameras_open()
+                            && state.cameras.enlarged.is_some()
+                            && media_key(key).is_some() =>
+                        {
+                            if let Some(media) = media_key(key) {
+                                state.camera_media(media);
+                            }
+                        }
+                        // The Cameras gallery is an overlay too; Menu opens a camera's options.
+                        Keycode::M | Keycode::Menu
+                            if !repeat && (state.overlay.is_none() || state.cameras_open()) =>
+                        {
                             press = None;
                             state.options();
                         }
@@ -1652,6 +2006,8 @@ fn run() -> Result<(), String> {
             && frame.is_multiple_of(3)
             && !options.script.front().is_some_and(|action| {
                 (action == "await-search" && state.weather.searching)
+                    || (action == "await-titles"
+                        && (state.titles.searching || state.titles.deadline().is_some()))
                     || (action == "await-weather" && state.weather.fetching())
                     || (action == "await-recents" && state.recents.pending.is_some())
                     || (action == "await-upload"
@@ -1660,6 +2016,7 @@ fn run() -> Result<(), String> {
                     || (action == "await-tile-editor"
                         && matches!(state.overlay, Some(Overlay::TileEditor))
                         && state.tile_editor.is_none())
+                    || (action == "await-cameras" && !state.cameras_shown())
             })
             && let Some(action) = options.script.pop_front()
         {
@@ -1704,7 +2061,79 @@ fn run() -> Result<(), String> {
         if input_refresh.due(Instant::now(), inputs_active) {
             platform.send(Request::RefreshInputs);
         }
+        // Another app is in front of Luma as Home: watch for its HDMI source switching off.
+        // As a plain app, Home would be LG's own, so leave the input alone there.
+        if signal_watch.due(
+            Instant::now(),
+            webos && options.webos_home && !(focused && visible),
+        ) {
+            platform.send(Request::WatchSignal);
+        }
         weather_tick(&mut state, &weather_service, visible);
+        // Movies and shows for the Apps search: network and disk stay on the search worker.
+        // Opening Search connects to the APIs while the first letters are still being typed.
+        let search_open = state.page == state::Page::Search && state.streaming_keys.motn;
+        if search_open && !search_was_open {
+            streaming_search.warm();
+        }
+        search_was_open = search_open;
+        if let Some(request) = state.sync_titles(Instant::now()) {
+            streaming_search.send(streaming_search::Job {
+                request,
+                services: state.streaming_services(),
+            });
+        }
+        for (request, reply) in streaming_search.receiver.try_iter() {
+            state.accept_titles(&request, reply);
+        }
+        if let Some(requests) = state.poster_requests() {
+            posters.want(state.titles.results.iter().map(|r| r.show.id.as_str()));
+            for request in requests {
+                posters.send(request);
+            }
+        }
+        for (show_id, poster) in posters.receiver.try_iter() {
+            state.accept_poster(&show_id, poster);
+        }
+        // The Criterion screen's rows and artwork, read off the SDL thread.
+        if state.criterion_load_requested() {
+            criterion_catalog.load();
+        }
+        for reply in criterion_catalog.receiver.try_iter() {
+            state.accept_criterion(reply);
+        }
+        if let Some((wanted, requests)) = state.criterion_image_requests() {
+            criterion_images.want(wanted.iter().map(String::as_str));
+            for request in requests {
+                criterion_images.send(request);
+            }
+        }
+        for (key, image) in criterion_images.receiver.try_iter() {
+            state.accept_criterion_image(&key, image);
+        }
+        if let Some(film) = state.criterion_resolve_request() {
+            criterion_catalog.resolve(&film);
+        }
+        let resolved: Vec<_> = criterion_catalog.resolved.try_iter().collect();
+        for (id, link) in resolved {
+            let pending = state.criterion_resolved(&id, link);
+            running &= effects(
+                pending,
+                &mut state,
+                &platform,
+                &preferences_path,
+                &weather_service,
+                &wallpaper_service,
+                &webhook_service,
+                &updates,
+            );
+        }
+        if let Some(ids) = state.score_requests() {
+            scores.send(ids);
+        }
+        for reply in scores.receiver.try_iter() {
+            state.accept_scores(reply);
+        }
         // SDL-webOS disables text input when its own panel is dismissed, even
         // if it did not forward a Back/Return key to the application.
         if text_active
@@ -1733,9 +2162,15 @@ fn run() -> Result<(), String> {
             }
             text_active = keyboard;
         }
-        let dt = last_frame.elapsed().as_secs_f32().min(0.1);
-        last_frame = Instant::now();
-        let navigation = view::navigation(&assets, state.preferences.language);
+        // Home Assistant offers to type the open field on a phone; it ignores repeats.
+        home_assistant.keyboard(keyboard.then(|| state.keyboard_field.key()));
+        let dt = clock::since(last_frame).as_secs_f32().min(0.1);
+        last_frame = clock::now();
+        let navigation = view::navigation(
+            &assets,
+            state.preferences.language,
+            state.page == state::Page::Search,
+        );
         let target = navigation.items[state.page_index()].x;
         let target_width = navigation.items[state.page_index()].w;
         if state.preferences.reduced_motion
@@ -1765,6 +2200,10 @@ fn run() -> Result<(), String> {
                         path,
                         options.capture_size.unwrap_or(Size::HD),
                     )?);
+                }
+                if renderer.see_through != scene.see_through {
+                    renderer.see_through = scene.see_through;
+                    damage_tracker.reset();
                 }
                 let damage = partial.as_ref().and_then(|partial| {
                     if last_drawable != Some(Size::new(width, height)) {
@@ -1815,8 +2254,9 @@ fn run() -> Result<(), String> {
                     startup_stage("first frame");
                     if webos {
                         let stats = renderer.stats();
-                        eprintln!(
-                            "Luma vector text: {} glyphs, {} text runs, {} KiB glyph geometry, {} KiB GPU text",
+                        crate::telemetry::log_info!(
+                            "startup",
+                            "vector text: {} glyphs, {} text runs, {} KiB glyph geometry, {} KiB GPU text",
                             stats.cached_glyphs,
                             stats.cached_text_runs,
                             stats.glyph_geometry_bytes / 1024,
@@ -1826,6 +2266,10 @@ fn run() -> Result<(), String> {
                 }
                 presented += 1;
                 last_present = Instant::now();
+                telemetry::frame(
+                    last_present,
+                    compose_ms + renderer.stats().cpu_submission_ms + swap_ms,
+                );
                 if options.profile_frames.is_some() {
                     profile.record(
                         Instant::now(),
@@ -1860,6 +2304,7 @@ fn run() -> Result<(), String> {
             state.dirty = false;
         }
         frame += 1;
+        clock::advance();
         if final_frame {
             running = false;
         }
@@ -1868,12 +2313,13 @@ fn run() -> Result<(), String> {
         {
             // Fall back to the restart sam does for an unregistered Home: remember that and
             // end the registration, which quits Luma so sam starts it afresh.
-            eprintln!(
-                "Luma lifecycle: a relaunch did not bring Luma to the front; creating {}",
+            crate::telemetry::log_warn!(
+                "lifecycle",
+                "a relaunch did not bring Luma to the front; creating {}",
                 platform::HOME_LIFECYCLE_OFF
             );
             if let Err(error) = std::fs::write(platform::HOME_LIFECYCLE_OFF, b"") {
-                eprintln!("Luma lifecycle: {error}");
+                crate::telemetry::log_warn!("lifecycle", "{error}");
             }
             end_registration();
         }
@@ -1891,8 +2337,9 @@ fn run() -> Result<(), String> {
                 let (width, height) = window.drawable_size();
                 renderer.prepare(&hidden.draw, width, height);
                 if webos {
-                    eprintln!(
-                        "Luma prewarm: {page:?} in {} ms",
+                    crate::telemetry::log_info!(
+                        "startup",
+                        "prewarm {page:?} in {} ms",
                         started.elapsed().as_millis()
                     );
                 }
@@ -1919,6 +2366,13 @@ fn run() -> Result<(), String> {
             || assets.artwork.pending()
         {
             8
+        } else if cameras_asked.is_some_and(|at| at.elapsed() < Duration::from_millis(300)) {
+            // The Home Assistant thread answers with the cameras at once: open without waiting
+            // out an idle screen's long wake.
+            4
+        } else if state.cameras_visible() {
+            // Camera frames arrive from worker threads, not as SDL events.
+            16
         } else if !prewarm.is_empty() {
             500
         } else {
@@ -1936,7 +2390,7 @@ fn run() -> Result<(), String> {
         let state = serde_json::json!({ "page": state.page, "focus": state.focus, "query": state.query,
             "filter": state.filter, "preferences": state.preferences, "apps": state.apps().iter().map(|a| &a.id).collect::<Vec<_>>(),
             "update_status": state.update_status, "available_update": state.available_update,
-            "error": state.error, "scroll": state.scroll, "home_scroll": state.home_scroll, "subpage": state.subpage, "modal": state.overlay.is_some(), "weather": state.weather,
+            "error": state.error, "scroll": state.scroll, "subpage": state.subpage, "modal": state.overlay.is_some(), "weather": state.weather,
             "inventory": state.inventory.apps,
             "recents": state.recents.entries, "recents_pending": state.recents.pending, "recents_error": state.recents.error, "recents_visibility": state.recents.visibility,
             "ui_text": scene.draw.iter().filter_map(|draw| match draw { renderer::Draw::Text(value, ..) => Some(value), _ => None }).collect::<Vec<_>>() });

@@ -2,6 +2,20 @@
 
 A native launcher for rooted LG webOS TVs, inspired by Apple TV.
 
+> [!NOTE]
+> **Here from HACS?** This repository holds two things: Luma, the TV launcher this page
+> describes, and **Luma for LG webOS**, its Home Assistant integration. HACS installs only the
+> integration (`custom_components/luma`). It lets Home Assistant show a camera, such as a
+> doorbell, in a corner of the TV over whatever is playing, and send notification toasts.
+>
+> The integration needs a TV that already runs Luma with **Settings → System → Home Assistant**
+> turned on. After downloading it in HACS, restart Home Assistant, add **Luma for LG webOS** (it
+> is usually discovered on its own) and type the code shown on the TV.
+> To see what the popups look like, press **Show example camera card** or **Show example toast**
+> on the TV's device page. Setup, actions and automation examples are in the
+> [Home Assistant guide](home-assistant.md).
+> The rest of this page is about the TV app.
+
 https://github.com/user-attachments/assets/3d3564d9-5942-4aef-a726-0323f5e86a07
 
 <details>
@@ -120,12 +134,17 @@ https://luma.elischleifer.com/repo.json
 This fork mirrors every published release to Cloudflare R2; see
 [Release hosting](development.md#release-hosting-cloudflare-r2).
 
+Once installed, Luma updates itself from **Settings → System → Check now**. To also get nightly
+builds of `main`, set **Settings → System → Updates** to **Releases and nightlies**: Luma then
+checks `https://luma.elischleifer.com/nightly/repo.json` as well and offers whichever is newer, so
+it still moves on to the next release when one comes out.
+
 ### SSH
 
 On your computer, replace `TV_IP`:
 
 ```sh
-scp -O dist/com.ecklf.luma_2.19.0_arm.ipk root@TV_IP:/tmp/luma.ipk
+scp -O dist/com.ecklf.luma_2.33.0_arm.ipk root@TV_IP:/tmp/luma.ipk
 ssh root@TV_IP
 ```
 
@@ -244,6 +263,37 @@ Toggle **Gradient** beside **Rotation** to turn background shading on or off. It
 and remembers your choice. Older uploads without an unshaded copy keep their full-resolution
 shaded image. This does not change LG's launch splash.
 
+### LG Search
+
+The round search button at the right of the header opens LG's own search, for content across
+the TV's apps and voice search. From the tabs, press **Right** on **Settings** to reach it, then
+**OK**. It appears only when the TV has LG's search app; which one Luma picked is named in its log.
+
+### Search: movies and shows
+
+The **Search** tab, left of **Home**, finds movies and shows and where they stream on your TV's
+apps. It needs a Movie of the Night key (see [streaming search keys](home-assistant.md#streaming-search-keys),
+or **Settings → System → Streaming search keys**); a TMDB token puts well-known US titles first.
+
+Opening the tab turns it into the search field and brings up the keyboard. After three letters
+and a short pause, results appear as posters, two rows of eight on screen. Above them, a few
+lines describe the selected title: year, US rating (PG-13, TV-14), length or seasons, genres,
+review scores, the app on your TV that carries it with what it costs there (included, or rent
+or buy with the price), and what it is about. Each poster is marked in its corner: a check when one of your TV's apps includes the title, or
+**$** when it is a rental or purchase there. Titles on none of your TV's apps have no mark and
+are dimmed at the end; that includes titles only on a paid add-on channel inside another app
+(Shout! TV on Prime Video), which Luma does not count.
+
+An optional MDBList key adds review scores: the Rotten Tomatoes critics score (tomato, red when
+fresh at 60% or more) and audience score (popcorn), and the IMDb rating (star). One MDBList
+request covers a whole search, and its free 1,000 requests a day are plenty.
+
+Press **Down** from the field to reach the results and **OK** to open the selected title in its
+app; **OK** on the field brings the keyboard back, and **Back** returns to the field, then Home.
+Apple TV and Prime Video open straight to the title; other apps may open on their home screen
+instead until their links are confirmed on a TV. Replies and posters are cached beside the preferences, so repeating a search
+makes no API calls and downloads nothing. The **Apps** page's search box still finds apps.
+
 ### Recent app switching
 
 Press **Back** on Home, or hold **Back** for 0.6 seconds from any page, to open Recent apps.
@@ -265,9 +315,29 @@ the QR code.
 
 Show a camera, such as a UniFi Protect doorbell, in a corner of the screen over whatever is
 playing, with the option to pause the show until it closes, plus notification toasts. Turn on
-**Settings → General → Home Assistant** and scan the QR code with your phone: it opens HACS on
+**Settings → System → Home Assistant** and scan the QR code with your phone: it opens HACS on
 your Home Assistant with the `luma` integration ready to install. Home Assistant then finds the TV
-and asks for the code shown on it. See [Home Assistant](home-assistant.md).
+and asks for the code shown on it. Once paired, a **Cameras** app appears among your apps and
+shows every Home Assistant camera in a full-screen grid. See [Home Assistant](home-assistant.md).
+
+### Criterion Channel
+
+The Criterion Channel has no LG app. Luma's **Criterion Channel** tile shows films on the
+Channel in a full-screen grid: Popular, Top Rated, Recently Released and a row per genre. OK
+plays the film in a small player app that Luma installs the first time it is needed: the
+Channel's web player, full screen, with the remote's play, pause and skip keys. Back returns to
+the grid.
+
+The rows come from TMDB's streaming data when a TMDB token is stored (see
+[Search: movies and shows](#search-movies-and-shows)),
+refreshed twice a day. Choosing a film asks Movie of the Night once for its page on the
+Channel; without a Movie of the Night key, or when it does not know the film, the player opens
+the Channel's search for the title. Without a TMDB token, the rows are read from the Channel's
+public home page instead, so a redesign of that page can empty the grid until Luma is updated.
+
+The player signs in with the account kept in Home Assistant (see
+[Criterion Channel account](home-assistant.md#criterion-channel-account)); without one, the first
+film asks you to sign in with the remote, and the player remembers it.
 
 ## Development
 
@@ -289,7 +359,7 @@ checksum-pinned SDL-webOS library; both downloads are cached under `.build/`.
 Output:
 
 ```text
-dist/com.ecklf.luma_2.19.0_arm.ipk
+dist/com.ecklf.luma_2.33.0_arm.ipk
 dist/sha256sums
 dist/repo.json
 dist/app-icon-large.png
@@ -327,8 +397,8 @@ pnpm dev --test-extra-apps 120
 Preview preferences are separate from normal preferences. See [development.md](development.md)
 for controls, vector rendering, diagnostics, tests and the source layout.
 
-For release-worthy changes, include a file generated by `pnpm changeset` in your PR. Merging does
-not publish; run the **Release** workflow from the Actions tab to ship pending changes.
+Merging does not publish: run the **Release** workflow from the Actions tab to ship what has
+merged. It releases the next minor version by default, or a major version when chosen.
 See [Releases](development.md#releases) for the workflow and repository setup.
 
 ## License

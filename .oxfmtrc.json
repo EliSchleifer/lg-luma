@@ -4,9 +4,12 @@
   "printWidth": 100,
   "trailingComma": "all",
   "sortPackageJson": false,
-  "overrides": [{ "files": ["tv/*.cjs"], "options": { "trailingComma": "none" } }],
+  "overrides": [
+    { "files": ["tv/*.cjs"], "options": { "trailingComma": "none" } },
+    { "files": ["overlay/*.js"], "options": { "trailingComma": "es5" } },
+    { "files": ["criterion/**/*.js"], "options": { "trailingComma": "es5" } }
+  ],
   "ignorePatterns": [
-    "**/.changeset/**",
     ".agents/skills/**",
     "node_modules/**",
     "dist/**",
@@ -15,6 +18,9 @@
     "pnpm-lock.yaml",
     "assets/fonts/**",
     "assets/licenses/**",
-    "assets/ui-icons/**"
+    "assets/ui-icons/**",
+    "overlay/vendor/**",
+    "tests/fixtures/**",
+    "tools/openapi/*.json"
   ]
 }

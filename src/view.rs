@@ -4,9 +4,8 @@ use crate::{
     model::{App, BACKGROUNDS, CATEGORIES, Console, Input, InputMode},
     renderer::{Color, Draw, TextStyle, WHITE},
     state::{
-        APPS_COLUMNS, Control, HOME_FADE_LEFT, HOME_FADE_RIGHT, HOME_STRIP_LEFT, HOME_STRIP_RIGHT,
-        HOME_TILE_PITCH, HOME_TILE_WIDTH, KEYS, Overlay, Page, Rect, SYSTEM_SECTION, State,
-        Subpage, Target, TextField, WIDGETS_SECTION,
+        APPS_COLUMNS, Control, HOME_COLUMNS, HOME_TILE_PITCH, HOME_TILE_WIDTH, KEYS, Overlay, Page,
+        Rect, SYSTEM_SECTION, State, Subpage, Target, TextField, WIDGETS_SECTION,
     },
     weather::{self, Unit},
 };
@@ -21,6 +20,10 @@ const FACE_HEIGHT: f32 = 154.4;
 const GRID_PITCH: f32 = 296.4;
 const RECENTS_BACKDROP_OPACITY: f32 = 0.86;
 
+#[path = "cameras-view.rs"]
+mod cameras_view;
+#[path = "criterion-view.rs"]
+mod criterion_view;
 #[path = "recents-view.rs"]
 mod recents_view;
 
@@ -161,6 +164,8 @@ impl Assets {
 }
 
 pub struct Scene {
+    /// The window is cleared transparent, uncovering the TV's video plane behind it.
+    pub see_through: bool,
     pub draw: Vec<Draw>,
     pub controls: Vec<Control>,
     pub modal: Option<Rect>,
@@ -168,6 +173,7 @@ pub struct Scene {
 impl Scene {
     fn new() -> Self {
         Self {
+            see_through: false,
             draw: Vec::new(),
             controls: Vec::new(),
             modal: None,
@@ -256,7 +262,8 @@ impl Scene {
                 | Draw::Shadow(_, _, _, color)
                 | Draw::Text(_, _, _, color, _)
                 | Draw::TintedImage(_, _, _, _, color)
-                | Draw::AppImage(_, _, _, color) => apply(color),
+                | Draw::AppImage(_, _, _, color)
+                | Draw::Camera(_, _, _, _, color) => apply(color),
                 Draw::RoundedGradient(_, _, a, b) => {
                     apply(a);
                     apply(b);
@@ -270,7 +277,7 @@ impl Scene {
                         [brightness, brightness, brightness, alpha],
                     );
                 }
-                Draw::Clip(_) | Draw::EdgeFade(_) | Draw::EdgeFadeX(_) => {}
+                Draw::Clip(_) | Draw::EdgeFade(_) => {}
             }
         }
     }
@@ -313,6 +320,22 @@ fn tile_editor(out: &mut Scene, state: &State, assets: &Assets) {
             private: "tileEditorPrivate",
             error: "tileEditorError",
             starting: "tileEditorStarting",
+        },
+    );
+}
+
+fn key_editor(out: &mut Scene, state: &State, assets: &Assets) {
+    companion(
+        out,
+        state,
+        assets,
+        state.key_editor.as_ref(),
+        Companion {
+            title: "streamingKeysTitle",
+            keep_open: "streamingKeysKeepOpen",
+            private: "streamingKeysPrivate",
+            error: "streamingKeysError",
+            starting: "streamingKeysStarting",
         },
     );
 }
@@ -484,30 +507,70 @@ fn home_assistant_setup(out: &mut Scene, state: &State, assets: &Assets) {
         WHITE,
         true,
     );
+    // Home Assistant asked to pair: its code replaces the QR code until it pairs or expires.
+    let hint = if state.home_assistant_paired.is_some() {
+        "homeAssistantPairedHint"
+    } else if state.home_assistant_code.is_some() {
+        "homeAssistantPairingHint"
+    } else {
+        "homeAssistantSetupHint"
+    };
     out.text(
-        language.t("homeAssistantSetupHint"),
+        language.t(hint),
         Rect::new(604., 264., 712., 32.),
         text(19., 400, 0.).leading(1.5),
         c(0xffffff, 0.65),
         true,
     );
-    match &state.home_assistant_qr {
-        Some(Ok(session)) => qr_code(out, assets, session, 310.),
-        _ => out.text(
-            language.t("homeAssistantFailed"),
-            Rect::new(604., 470., 712., 90.),
-            text(22., 450, 0.).leading(1.5),
-            c(0xffffff, 0.75),
+    if let Some(name) = &state.home_assistant_paired {
+        out.icon(assets, "check", Rect::new(920., 380., 80., 80.), WHITE);
+        let paired = language.format("homeAssistantPaired", &[("name", name)]);
+        out.text(
+            &paired,
+            Rect::new(568., 500., 784., 48.),
+            assets.fit_text(&paired, text(34., 600, -0.01), 784.),
+            WHITE,
             true,
-        ),
+        );
+    } else if let Some(code) = &state.home_assistant_code {
+        // Two groups of three digits read back more easily across a room.
+        let shown = match code.split_at_checked(3) {
+            Some((first, second)) => format!("{first} {second}"),
+            None => code.clone(),
+        };
+        out.text(
+            &shown,
+            Rect::new(520., 390., 880., 140.),
+            text(120., 600, 0.06),
+            WHITE,
+            true,
+        );
+        out.text(
+            language.t("homeAssistantPairingExpires"),
+            Rect::new(604., 560., 712., 32.),
+            text(19., 400, 0.).leading(1.5),
+            c(0xffffff, 0.65),
+            true,
+        );
+    } else {
+        match &state.home_assistant_qr {
+            Some(Ok(session)) => qr_code(out, assets, session, 310.),
+            _ => out.text(
+                language.t("homeAssistantFailed"),
+                Rect::new(604., 470., 712., 90.),
+                text(22., 450, 0.).leading(1.5),
+                c(0xffffff, 0.75),
+                true,
+            ),
+        }
+        out.text(
+            language.t("homeAssistantSetupNext"),
+            Rect::new(604., 670., 712., 60.),
+            text(19., 400, 0.).leading(1.5),
+            c(0xffffff, 0.65),
+            true,
+        );
     }
-    out.text(
-        language.t("homeAssistantSetupNext"),
-        Rect::new(604., 670., 712., 60.),
-        text(19., 400, 0.).leading(1.5),
-        c(0xffffff, 0.65),
-        true,
-    );
     if let Some(address) = &state.home_assistant_address {
         let address = language.format("homeAssistantListening", &[("address", address)]);
         out.text(
@@ -544,22 +607,38 @@ fn text(size: f32, weight: u16, tracking: f32) -> TextStyle {
 
 pub struct Navigation {
     pub surface: Rect,
-    pub items: [Rect; 3],
+    /// Tab rectangles by tab index (Home, Apps, Settings, Search), not drawn order.
+    pub items: [Rect; 4],
 }
-pub fn navigation(assets: &Assets, language: Language) -> Navigation {
-    let widths = ["home", "apps", "settings"]
-        .map(|key| (assets.width(language.t(key), text(20.8, 550, -0.02)) + 46.4).max(99.2));
-    let width = widths.iter().sum::<f32>() + 25.6 + 19.6;
+
+/// The Search tab's width on the Search page, where it is the search field.
+pub const SEARCH_FIELD_WIDTH: f32 = 560.;
+/// The field never grows into the clock.
+const SEARCH_FIELD_MIN_X: f32 = 300.;
+
+/// Header tabs, centred, in the order Search, Home, Apps, Settings. On the Search page
+/// (`search_open`) the Search tab grows leftward into the search field; the other tabs keep
+/// their places, so only the pill and the left edge of the surface move.
+pub fn navigation(assets: &Assets, language: Language, search_open: bool) -> Navigation {
+    let keys = ["home", "apps", "settings", "search"];
+    let widths =
+        keys.map(|key| (assets.width(language.t(key), text(20.8, 550, -0.02)) + 46.4).max(99.2));
+    let width = widths.iter().sum::<f32>() + 12.8 * 3. + 19.6;
     let mut x = (1920. - width) / 2. + 9.8;
-    let items = widths.map(|width| {
-        let rect = Rect::new(x, 52.3, width, 49.);
-        x += width + 12.8;
-        rect
-    });
-    Navigation {
-        surface: Rect::new((1920. - width) / 2., 42.5, width, 68.6),
-        items,
+    let mut items = [Rect::default(); 4];
+    for tab in crate::state::TAB_ORDER {
+        items[tab] = Rect::new(x, 52.3, widths[tab], 49.);
+        x += widths[tab] + 12.8;
     }
+    let mut surface = Rect::new((1920. - width) / 2., 42.5, width, 68.6);
+    if search_open {
+        let home = items[0];
+        let left = (home.x - 12.8 - SEARCH_FIELD_WIDTH).max(SEARCH_FIELD_MIN_X);
+        items[crate::state::SEARCH_TAB] = Rect::new(left, 52.3, home.x - 12.8 - left, 49.);
+        surface.w += surface.x - (left - 9.8);
+        surface.x = left - 9.8;
+    }
+    Navigation { surface, items }
 }
 
 /// Fully shown Recents is drawn instead of the page, which is then not part of the scene.
@@ -582,7 +661,7 @@ pub fn scene_with_pill(
             0.,
             false,
         );
-        let alpha = (start.elapsed().as_secs_f32() / state.background_fade).min(1.);
+        let alpha = (crate::clock::since(*start).as_secs_f32() / state.background_fade).min(1.);
         out.draw.push(Draw::TintedImage(
             assets.background(state, &state.preferences.background),
             Rect::new(0., 0., 1920., 1080.),
@@ -599,6 +678,26 @@ pub fn scene_with_pill(
         );
     }
     let content_start = out.draw.len();
+    // The Cameras gallery is opaque and full screen: the page underneath is not drawn.
+    if state.cameras_visible() {
+        if state.cameras.see_through() {
+            out.draw.clear();
+            out.see_through = true;
+        }
+        cameras_view::render(&mut out, state, assets, now);
+        if let Some((notice, _)) = &state.notice {
+            toast(&mut out, state, assets, notice);
+        }
+        return out;
+    }
+    // Like Cameras, the Criterion screen is opaque and full screen.
+    if state.criterion_open() {
+        criterion_view::render(&mut out, state, assets);
+        if let Some((notice, _)) = &state.notice {
+            toast(&mut out, state, assets, notice);
+        }
+        return out;
+    }
     if recents_replaces_page(state) {
         out.shape(
             Rect::new(0., 0., 1920., 1080.),
@@ -619,7 +718,8 @@ pub fn scene_with_pill(
     match state.page {
         Page::Home => home(&mut out, state, assets, now),
         Page::Apps => library(&mut out, state, assets),
-        Page::Settings => settings(&mut out, state, assets),
+        Page::Settings => settings(&mut out, state, assets, now),
+        Page::Search => search_page(&mut out, state, assets),
     }
     if let Some(error) = &state.error
         && !state.inventory.apps.is_empty()
@@ -668,6 +768,7 @@ pub fn scene_with_pill(
         | Overlay::Keyboard
         | Overlay::WallpaperUpload
         | Overlay::TileEditor
+        | Overlay::StreamingKeys
         | Overlay::HomeAssistantSetup),
     ) = &state.overlay
     {
@@ -688,8 +789,14 @@ pub fn scene_with_pill(
                     } else {
                         state.preferences.show_app_names
                     };
+                    let face = state.input_app(id);
                     if names
-                        && let Some(app) = state.inventory.apps.iter().find(|app| &app.id == id)
+                        && let Some(app) = state
+                            .inventory
+                            .apps
+                            .iter()
+                            .find(|app| &app.id == id)
+                            .or(face.as_ref())
                     {
                         rect.h -= 18.4 + caption_height(state, assets, app, rect.w);
                     }
@@ -707,7 +814,11 @@ pub fn scene_with_pill(
         {
             // The lifted card stays opaque while the backdrop and popup fade.
             // Fading it over its dimmed parent copy causes a brightness dip.
-            out.fade(start, (opened.elapsed().as_secs_f32() / 0.12).min(1.), 1.);
+            out.fade(
+                start,
+                (crate::clock::since(opened).as_secs_f32() / 0.12).min(1.),
+                1.,
+            );
         }
         match overlay {
             Overlay::Options { id, .. } | Overlay::BackgroundOptions { id, .. } => {
@@ -719,15 +830,23 @@ pub fn scene_with_pill(
             Overlay::Keyboard => keyboard(&mut out, state, assets),
             Overlay::WallpaperUpload => wallpaper_upload(&mut out, state, assets),
             Overlay::TileEditor => tile_editor(&mut out, state, assets),
+            Overlay::StreamingKeys => key_editor(&mut out, state, assets),
             Overlay::HomeAssistantSetup => home_assistant_setup(&mut out, state, assets),
-            Overlay::SystemKeyboard | Overlay::Recents { .. } => {}
+            Overlay::SystemKeyboard
+            | Overlay::Recents { .. }
+            | Overlay::Cameras { .. }
+            | Overlay::Criterion { .. } => {}
         }
         if !matches!(
             overlay,
             Overlay::Options { .. } | Overlay::BackgroundOptions { .. }
         ) && let Some(opened) = state.panel_started
         {
-            out.fade(start, (opened.elapsed().as_secs_f32() / 0.12).min(1.), 1.);
+            out.fade(
+                start,
+                (crate::clock::since(opened).as_secs_f32() / 0.12).min(1.),
+                1.,
+            );
         }
     }
     if state.recents_open() || state.recents.visibility > 0. {
@@ -787,8 +906,17 @@ fn header(
         WHITE,
         false,
     );
-    let layout = navigation(assets, language);
-    let nav = layout.surface;
+    let search_page = state.page == Page::Search;
+    let layout = navigation(assets, language, search_page);
+    let mut nav = layout.surface;
+    // The surface's left edge follows the pill while the search field grows or shrinks.
+    let collapsed = navigation(assets, language, false).surface;
+    let left = (pill_x - 9.8).min(collapsed.x);
+    nav.w += nav.x - left;
+    nav.x = left;
+    if !search_page {
+        nav.w = collapsed.x + collapsed.w - left;
+    }
     out.shadow(nav, 48., 18., 4., 0.06);
     out.shape(nav, 48., c(0x171c20, 0.72));
     out.border(nav, 48., 1., c(0xffffff, 0.07));
@@ -804,8 +932,16 @@ fn header(
         // the destination tab's control rectangle.
         out.border(pill.inset(-5.), 37., 2., c(0xf0f0f0, 0.95));
     }
-    for (index, key) in ["home", "apps", "settings"].into_iter().enumerate() {
+    for (index, key) in ["home", "apps", "settings", "search"]
+        .into_iter()
+        .enumerate()
+    {
         let rect = layout.items[index];
+        if index == crate::state::SEARCH_TAB && search_page {
+            search_field(out, state, assets, pill);
+            out.control(Target::Nav(index), rect, false);
+            continue;
+        }
         out.text(
             language.t(key),
             Rect::new(rect.x, 64.3, rect.w, 25.),
@@ -819,31 +955,88 @@ fn header(
         );
         out.control(Target::Nav(index), rect, false);
     }
-    let button_size = 60.;
-    let rect = Rect::new(
-        1836. - button_size,
-        nav.y + (nav.h - button_size) / 2.,
-        button_size,
-        button_size,
-    );
-    let focused = state.focus == Target::TvSettings;
-    out.pill(rect, focused, false);
+    if state.inventory.search.is_some() {
+        lg_search_button(out, state, assets);
+    }
+}
+
+/// The Search tab as the search field: an icon, then what is typed, or a placeholder, with a
+/// caret while the keyboard is up. Drawn inside the pill so it grows with it.
+fn search_field(out: &mut Scene, state: &State, assets: &Assets, pill: Rect) {
+    let language = state.preferences.language;
+    let ink = c(0x2c2c2c, 1.);
     out.icon(
         assets,
-        "settings",
-        Rect::new(
-            rect.x + (rect.w - 23.2) / 2.,
-            rect.y + (rect.h - 23.2) / 2.,
-            23.2,
-            23.2,
-        ),
+        "search",
+        Rect::new(pill.x + 18., pill.y + 14.5, 20., 20.),
+        ink,
+    );
+    let x = pill.x + 48.;
+    let available = (pill.x + pill.w - 20. - x).max(0.);
+    let style = text(20.8, 550, -0.02);
+    let typing = state.text_input_active() && state.keyboard_field == TextField::Titles;
+    let query = state.title_query.as_str();
+    let (value, color) = if query.is_empty() {
+        (language.t("moviesAndShows").to_owned(), c(0x2c2c2c, 0.55))
+    } else {
+        // The end of a long query stays in view, as in a text box.
+        let mut shown = query.to_owned();
+        while assets.width(&shown, style) > available - 8. && !shown.is_empty() {
+            shown.remove(0);
+        }
+        (shown, ink)
+    };
+    let value = if query.is_empty() {
+        ellipsize(assets, &value, style, available)
+    } else {
+        value
+    };
+    out.text(
+        value.as_str(),
+        Rect::new(x, 64.3, available, 25.),
+        style,
+        color,
+        false,
+    );
+    if typing && available > 0. {
+        let end = if query.is_empty() {
+            0.
+        } else {
+            assets.width(&value, style)
+        };
+        out.shape(
+            Rect::new((x + end + 2.).min(x + available), 63., 2., 27.),
+            1.,
+            c(0x2c2c2c, 0.85),
+        );
+    }
+}
+
+/// Header search button: a circle level with the tabs at the right content margin.
+pub const LG_SEARCH: Rect = Rect::new(1836. - 68.6, 42.5, 68.6, 68.6);
+
+fn lg_search_button(out: &mut Scene, state: &State, assets: &Assets) {
+    let focused = state.focus == Target::LgSearch;
+    out.pill(LG_SEARCH, focused, false);
+    if focused && !state.pointer {
+        out.border(
+            LG_SEARCH.inset(-5.),
+            LG_SEARCH.h / 2. + 5.,
+            2.,
+            c(0xf0f0f0, 0.95),
+        );
+    }
+    out.icon(
+        assets,
+        "search",
+        LG_SEARCH.inset(21.),
         if focused {
             c(0x2c2c2c, 1.)
         } else {
             c(0xeeeeee, 0.73)
         },
     );
-    out.control(Target::TvSettings, rect, false);
+    out.control(Target::LgSearch, LG_SEARCH, false);
 }
 
 fn tile(
@@ -855,9 +1048,7 @@ fn tile(
     names: bool,
     pinned: bool,
 ) {
-    let input_face = (state.page == Page::Home)
-        .then(|| state.input_app(&app.id))
-        .flatten();
+    let input_face = state.input_app(&app.id);
     let app = input_face.as_ref().unwrap_or(app);
     let caption_height = if names {
         caption_height(state, assets, app, rect.w)
@@ -870,11 +1061,7 @@ fn tile(
         Rect::new(rect.x, rect.y, rect.w, rect.h + label_height),
         true,
     );
-    let viewport = if state.page == Page::Home {
-        state.favorites_viewport()
-    } else {
-        state.content_viewport()
-    };
+    let viewport = state.content_viewport();
     let top = if state.page == Page::Apps {
         0.
     } else {
@@ -1294,40 +1481,45 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
             },
         );
     }
-    // Like Apple TV's rows, the favourites run to the screen edge: the next tile shows cut off
-    // at the right (and a scrolled-away one at the left), so it is clear the row continues.
-    out.draw.push(Draw::Clip(Some(state.favorites_viewport())));
-    // Soft edges: out to the right from the end of the sixth tile, and in from the left once
-    // the row has scrolled.
-    let left = if state.home_scroll > 0. {
-        [HOME_FADE_LEFT, HOME_STRIP_LEFT]
-    } else {
-        [0., 0.]
-    };
-    out.draw.push(Draw::EdgeFadeX(Some([
-        left[0],
-        left[1],
-        HOME_STRIP_RIGHT,
-        HOME_FADE_RIGHT,
-    ])));
-    for (index, app) in apps.iter().enumerate() {
-        tile(
-            out,
-            state,
-            assets,
-            app,
-            Rect::new(
-                84. + index as f32 * HOME_TILE_PITCH - state.home_scroll,
-                544.8 - s,
-                HOME_TILE_WIDTH,
-                FACE_HEIGHT,
-            ),
-            names,
-            false,
-        );
+    // Six favourites per row; further favourites wrap onto rows below, which scroll into view.
+    // The clip runs to the screen edges so first-column focus shadows are not cut at the margin.
+    let content = state.content_viewport();
+    out.draw
+        .push(Draw::Clip(Some(Rect::new(0., content.y, 1920., content.h))));
+    let mut y = 544.8;
+    for row in apps.chunks(HOME_COLUMNS) {
+        let row_height = FACE_HEIGHT
+            + if names {
+                18.4 + row
+                    .iter()
+                    .map(|app| {
+                        // Measure what the card draws: an input shows its custom or console name.
+                        let face = state.input_app(&app.id);
+                        caption_height(state, assets, face.as_ref().unwrap_or(app), HOME_TILE_WIDTH)
+                    })
+                    .fold(0., f32::max)
+            } else {
+                0.
+            };
+        for (column, app) in row.iter().enumerate() {
+            tile(
+                out,
+                state,
+                assets,
+                app,
+                Rect::new(
+                    84. + column as f32 * HOME_TILE_PITCH,
+                    y - s,
+                    HOME_TILE_WIDTH,
+                    FACE_HEIGHT,
+                ),
+                names,
+                false,
+            );
+        }
+        y += row_height + 38.4;
     }
-    out.draw.push(Draw::EdgeFadeX(None));
-    out.draw.push(Draw::Clip(Some(state.content_viewport())));
+    out.draw.push(Draw::Clip(Some(content)));
 }
 
 struct WeatherSummary {
@@ -1565,19 +1757,26 @@ fn library_toolbar(out: &mut Scene, state: &State, assets: &Assets) {
         Rect::new(search.x + 19.4, search.y + 18.4, 19.2, 19.2),
         c(0xeeeeee, 0.73),
     );
+    let placeholder = language.t("findApp");
+    let field_width = if state.query.is_empty() { 234. } else { 202. };
     out.text(
         if state.query.is_empty() {
-            language.t("findApp")
+            placeholder
         } else {
             &state.query
         },
         Rect::new(
             search.x + 49.8,
             search.y + (search.h - 29.12) / 2.,
-            if state.query.is_empty() { 234. } else { 202. },
+            field_width,
             29.12,
         ),
-        text(20.8, 550, -0.02).leading(1.4),
+        if state.query.is_empty() {
+            assets.fit_text(placeholder, text(20.8, 550, -0.02), field_width)
+        } else {
+            text(20.8, 550, -0.02)
+        }
+        .leading(1.4),
         c(0xeeeeee, if state.query.is_empty() { 0.73 } else { 1. }),
         false,
     );
@@ -1637,7 +1836,12 @@ fn library_grid(out: &mut Scene, state: &State, assets: &Assets) {
             + if names {
                 18.4 + row
                     .iter()
-                    .map(|app| caption_height(state, assets, app, 270.))
+                    .map(|app| {
+                        // Input cards caption their face title (custom or console name), not
+                        // the port, as `tile` draws them.
+                        let face = state.input_app(&app.id);
+                        caption_height(state, assets, face.as_ref().unwrap_or(app), 270.)
+                    })
                     .fold(58.24, f32::max)
             } else {
                 0.
@@ -1655,6 +1859,501 @@ fn library_grid(out: &mut Scene, state: &State, assets: &Assets) {
         }
         y += row_height + 38.4;
     }
+}
+
+/// Review scores over a poster's bottom-left corner: the Rotten Tomatoes critics score
+/// (tomato, red when fresh at 60% or more) and audience score (popcorn), or the IMDb rating
+/// (star) when Rotten Tomatoes has neither. Nothing when there are no scores at all.
+fn score_badge(out: &mut Scene, assets: &Assets, scores: &crate::mdblist::Scores, poster: Rect) {
+    let mut items: Vec<(&str, Color, String)> = Vec::new();
+    if let Some(critics) = scores.critics {
+        let fresh = critics >= 60;
+        items.push((
+            "tomato",
+            if fresh {
+                c(0xf2412c, 1.)
+            } else {
+                c(0x8fb04a, 1.)
+            },
+            format!("{critics}%"),
+        ));
+    }
+    if let Some(audience) = scores.audience {
+        items.push(("popcorn", c(0xf6c344, 1.), format!("{audience}%")));
+    }
+    if items.is_empty()
+        && let Some(imdb) = scores.imdb
+    {
+        items.push(("star-filled", c(0xf5c518, 1.), format!("{imdb:.1}")));
+    }
+    if items.is_empty() {
+        return;
+    }
+    let style = text(17.6, 650, -0.01).leading(1.2);
+    let (icon, gap, pad, height) = (20., 5., 10., 34.);
+    let widths: Vec<f32> = items
+        .iter()
+        .map(|(_, _, label)| icon + gap + assets.width(label, style) + 2.)
+        .collect();
+    let width = pad * 2. + widths.iter().sum::<f32>() + 12. * (items.len() - 1) as f32;
+    let badge = Rect::new(
+        poster.x + 10.,
+        poster.y + poster.h - height - 10.,
+        width,
+        height,
+    );
+    out.shape(badge, height / 2., c(0x0b0e12, 0.82));
+    let mut x = badge.x + pad;
+    for ((name, color, label), item) in items.iter().zip(widths) {
+        out.icon(
+            assets,
+            name,
+            Rect::new(x, badge.y + (height - icon) / 2., icon, icon),
+            *color,
+        );
+        out.text(
+            label.as_str(),
+            Rect::new(x + icon + gap, badge.y + (height - 21.12) / 2., item, 21.12),
+            style,
+            WHITE,
+            false,
+        );
+        x += item + 12.;
+    }
+}
+
+/// Shortens `value` with an ellipsis to fit `width` on one line.
+fn ellipsize(assets: &Assets, value: &str, style: TextStyle, width: f32) -> String {
+    if assets.width(value, style) <= width {
+        return value.into();
+    }
+    let mut chars: Vec<char> = value.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let candidate = format!("{}…", chars.iter().collect::<String>().trim_end());
+        if assets.width(&candidate, style) <= width {
+            return candidate;
+        }
+    }
+    "…".into()
+}
+
+/// The Movies & shows section under the Apps grid: a heading with the search status, then
+/// a poster grid in the app grid's columns. Under each poster: the title, then its year and the
+/// app it opens in, with what it costs there.
+/// Poster cards on the Search page: eight across, lined up with the content margins.
+const SEARCH_POSTER: (f32, f32) = (196., 294.);
+const SEARCH_PITCH: f32 = 222.3;
+const SEARCH_ROW: f32 = 294. + 12. + 26. + 34.;
+
+/// At most `lines` wrapped lines of `value` in `width`, ending with an ellipsis when cut.
+fn clamp_lines(assets: &Assets, value: &str, style: TextStyle, width: f32, lines: usize) -> String {
+    if assets.lines(value, style, width) <= lines {
+        return value.to_owned();
+    }
+    let words: Vec<&str> = value.split_whitespace().collect();
+    let (mut low, mut high) = (0, words.len());
+    // The most words that still fit with an ellipsis.
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        let candidate = format!("{}…", words[..middle].join(" "));
+        if assets.lines(&candidate, style, width) <= lines {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    format!("{}…", words[..low].join(" "))
+}
+
+/// Whether watching costs money, in the poster's top right corner: a check when an app on
+/// this TV includes the title (every installed app counts as subscribed), else "$" for a
+/// rental or purchase. Which app, and the price, are said for the selected
+/// title, above the posters. Titles on none of the TV's apps have no mark.
+fn cost_badge(out: &mut Scene, assets: &Assets, ranked: &crate::streaming::Ranked, poster: Rect) {
+    use crate::streaming::Access;
+    let Some(pick) = &ranked.pick else {
+        return;
+    };
+    let size = 28.;
+    let pill = Rect::new(poster.x + poster.w - size - 8., poster.y + 8., size, size);
+    out.shape(pill, size / 2., c(0x0b0e12, 0.82));
+    if pick.access == Access::Included {
+        out.icon(assets, "check", pill.inset(6.), c(0x5ae08c, 1.));
+    } else {
+        out.text(
+            "$",
+            Rect::new(pill.x, pill.y + 4., pill.w, 19.2),
+            text(16., 650, -0.01).leading(1.2),
+            WHITE,
+            true,
+        );
+    }
+}
+
+/// Where a title plays on this TV and what it costs there ("On HBO Max", "Rent on Apple TV ·
+/// $3.99"), or that none of the TV's apps has it.
+fn availability(state: &State, ranked: &crate::streaming::Ranked) -> String {
+    use crate::streaming::Access;
+    let language = state.preferences.language;
+    let Some(pick) = &ranked.pick else {
+        return language.t("titleNotOnApps").to_owned();
+    };
+    let app = state
+        .inventory
+        .apps
+        .iter()
+        .find(|a| a.id == pick.app_id)
+        .map_or(pick.service_id.as_str(), |app| app.title.as_str());
+    let key = match pick.access {
+        Access::Included => "titleOn",
+        Access::Rent => "titleRent",
+        Access::Buy => "titleBuy",
+    };
+    let place = language.format(key, &[("app", app)]);
+    match &pick.price {
+        Some(price) if pick.access != Access::Included => format!("{place} · {price}"),
+        _ => place,
+    }
+}
+
+fn years(show: &crate::motn_api::Show) -> String {
+    match (crate::streaming::year(show), show.last_air_year) {
+        (Some(first), Some(last)) if last > first => format!("{first}–{last}"),
+        (Some(first), _) => first.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// The Search page: the selected title large at the top, then the results as posters.
+fn search_page(out: &mut Scene, state: &State, assets: &Assets) {
+    let titles = &state.titles;
+    match state.selected_title() {
+        Some(selected) => search_hero(out, state, assets, selected),
+        None => search_status(out, state),
+    }
+    let viewport = state.search_viewport();
+    out.draw.push(Draw::Clip(Some(viewport)));
+    let s = state.scroll;
+    let (width, height) = SEARCH_POSTER;
+    let columns = crate::state::TITLE_COLUMNS;
+    for (index, ranked) in titles.results.iter().enumerate() {
+        let (column, row) = ((index % columns) as f32, (index / columns) as f32);
+        let rect = Rect::new(
+            84. + column * SEARCH_PITCH,
+            crate::state::SEARCH_GRID_TOP + row * SEARCH_ROW - s,
+            width,
+            height,
+        );
+        let target = Target::Title(index);
+        out.control(
+            target.clone(),
+            Rect::new(rect.x, rect.y, rect.w, SEARCH_ROW - 34.),
+            true,
+        );
+        if rect.y + SEARCH_ROW < viewport.y || rect.y > 1080. {
+            continue;
+        }
+        let focused = state.focus == target;
+        let show = &ranked.show;
+        let start = out.draw.len();
+        out.shadow(
+            rect,
+            16.,
+            if focused { 30. } else { 20. },
+            if focused { 12. } else { 8. },
+            if focused { 0.4 } else { 0.165 },
+        );
+        match state.posters.get(&show.id) {
+            Some(Some(poster)) => {
+                out.draw
+                    .push(Draw::Camera(poster.clone(), rect, 16., false, WHITE))
+            }
+            // Loading or no poster: the title on a plain card.
+            _ => {
+                out.shape(rect, 16., c(0x2a2f35, 0.92));
+                out.border(rect, 16., 1., c(0xffffff, 0.07));
+                out.text(
+                    show.title.as_str(),
+                    Rect::new(rect.x + 16., rect.y + 100., rect.w - 32., 90.),
+                    text(20.8, 650, -0.02).leading(1.3),
+                    c(0xffffff, 0.85),
+                    true,
+                );
+            }
+        }
+        if let Some(Some(scores)) = state.scores.get(&show.imdb_id) {
+            score_badge(out, assets, scores, rect);
+        }
+        cost_badge(out, assets, ranked, rect);
+        if focused {
+            out.ring(rect, 16.);
+        }
+        let style = text(18.4, if focused { 600 } else { 550 }, -0.01).leading(1.4);
+        out.text(
+            ellipsize(assets, &show.title, style, rect.w - 4.),
+            Rect::new(rect.x + 2., rect.y + rect.h + 12., rect.w - 4., 25.76),
+            style,
+            if focused {
+                c(0xffffff, 1.)
+            } else {
+                c(0xececec, 0.75)
+            },
+            false,
+        );
+        if ranked.pick.is_none() {
+            out.fade(start, 0.55, 1.);
+        }
+        if state.pressed.as_ref() == Some(&target) {
+            out.fade(start, 1., 0.85);
+        }
+    }
+    out.draw.push(Draw::Clip(None));
+}
+
+/// What the top of the Search page says when there is no title to show.
+fn search_status(out: &mut Scene, state: &State) {
+    use crate::streaming::MIN_QUERY_CHARS;
+    let language = state.preferences.language;
+    let titles = &state.titles;
+    let (heading, detail) = if !state.streaming_keys.motn {
+        (
+            language.t("moviesAndShows").to_owned(),
+            language.t("titlesNoKey").to_owned(),
+        )
+    } else if titles.query().is_empty() {
+        (
+            language.t("moviesAndShows").to_owned(),
+            language.t("titlesStart").to_owned(),
+        )
+    } else if titles.query().chars().count() < MIN_QUERY_CHARS {
+        (
+            language.t("moviesAndShows").to_owned(),
+            language.t("titlesKeepTyping").to_owned(),
+        )
+    } else if titles.searching || titles.deadline().is_some() {
+        (language.t("titlesSearching").to_owned(), String::new())
+    } else if titles.error.is_some() {
+        (
+            language.t("moviesAndShows").to_owned(),
+            language.t("titlesError").to_owned(),
+        )
+    } else {
+        (
+            language.t("moviesAndShows").to_owned(),
+            language.format("titlesNone", &[("query", &state.title_query)]),
+        )
+    };
+    out.text(
+        heading,
+        Rect::new(88., 200., 1700., 52.),
+        text(40., 650, -0.03).leading(1.3),
+        c(0xffffff, 0.92),
+        false,
+    );
+    if !detail.is_empty() {
+        out.text(
+            detail,
+            Rect::new(88., 262., 1200., 64.),
+            text(22.4, 500, -0.01).leading(1.4),
+            c(0xeeeeee, 0.65),
+            false,
+        );
+    }
+}
+
+/// The selected title at the top of the Search page, kept to four short lines so two rows of
+/// posters fit below: its name; year, US rating (boxed), length or seasons, kind and genres;
+/// review scores and where it plays on this TV with what it costs; and two lines about it.
+fn search_hero(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    selected: &crate::streaming::Ranked,
+) {
+    let language = state.preferences.language;
+    let show = &selected.show;
+    let x = 88.;
+    let right = 1832.;
+    let mut width = right - x;
+    // While a search is pending, or it failed, say so at the right of the title line: the
+    // results may be a local narrowing of an earlier reply.
+    let titles = &state.titles;
+    let status = if titles.error.is_some() {
+        Some(language.t("titlesError"))
+    } else if titles.searching || titles.deadline().is_some() {
+        Some(language.t("titlesSearching"))
+    } else {
+        None
+    };
+    if let Some(status) = status {
+        let style = text(20.8, 550, -0.01).leading(1.4);
+        let w = assets.width(status, style).min(width / 2.) + 2.;
+        out.text(
+            ellipsize(assets, status, style, w),
+            Rect::new(right - w, 140., w, 29.12),
+            style,
+            c(0xeeeeee, 0.65),
+            false,
+        );
+        width -= w + 32.;
+    }
+    let title_style = text(40., 650, -0.035).leading(1.2);
+    out.text(
+        ellipsize(assets, &show.title, title_style, width),
+        Rect::new(x, 126., width, 48.),
+        title_style,
+        WHITE,
+        false,
+    );
+
+    let length = match show.show_type {
+        crate::motn_api::ShowType::Series => match show.season_count {
+            Some(1) => language.t("seasonOne").to_owned(),
+            Some(count) if count > 1 => {
+                language.format("seasonCount", &[("count", &count.to_string())])
+            }
+            _ => String::new(),
+        },
+        _ => match show.runtime {
+            Some(minutes) if minutes >= 60 => format!("{}h {:02}m", minutes / 60, minutes % 60),
+            Some(minutes) if minutes > 0 => format!("{minutes}m"),
+            _ => String::new(),
+        },
+    };
+    let kind = language.t(match show.show_type {
+        crate::motn_api::ShowType::Series => "titleSeries",
+        _ => "titleMovie",
+    });
+    let genres: Vec<&str> = show
+        .genres
+        .iter()
+        .map(|g| g.name.as_str())
+        .take(3)
+        .collect();
+    // (text, boxed): the rating is boxed, as on a cinema listing.
+    let segments = [
+        (years(show), false),
+        (selected.rating.clone().unwrap_or_default(), true),
+        (length, false),
+        (kind.to_owned(), false),
+        (genres.join(", "), false),
+    ];
+    let meta_style = text(20.8, 550, -0.01).leading(1.4);
+    let mut cursor = x;
+    let y = 182.;
+    for (value, boxed) in segments.iter().filter(|(value, _)| !value.is_empty()) {
+        if cursor >= right {
+            break;
+        }
+        if *boxed {
+            let w = assets.width(value, meta_style) + 20.;
+            let chip = Rect::new(cursor, y - 1., w, 31.);
+            out.border(chip, 6., 1.5, c(0xffffff, 0.55));
+            out.text(
+                value.as_str(),
+                Rect::new(chip.x, y, chip.w, 29.12),
+                meta_style,
+                c(0xffffff, 0.92),
+                true,
+            );
+            cursor += w + 16.;
+        } else {
+            let value = ellipsize(assets, value, meta_style, right - cursor);
+            let w = assets.width(&value, meta_style) + 2.;
+            out.text(
+                value.as_str(),
+                Rect::new(cursor, y, w, 29.12),
+                meta_style,
+                c(0xeeeeee, 0.72),
+                false,
+            );
+            cursor += w + 16.;
+        }
+    }
+
+    let y = 222.;
+    let mut cursor = x;
+    if let Some(Some(scores)) = state.scores.get(&show.imdb_id) {
+        cursor += hero_scores(out, assets, scores, x, y);
+    }
+    let width = right - x;
+    let where_style = text(20.8, 650, -0.01).leading(1.4);
+    let place = ellipsize(
+        assets,
+        &availability(state, selected),
+        where_style,
+        right - cursor,
+    );
+    out.text(
+        place.as_str(),
+        Rect::new(cursor, y + 1., right - cursor, 29.12),
+        where_style,
+        if selected.pick.is_some() {
+            WHITE
+        } else {
+            c(0xeeeeee, 0.55)
+        },
+        false,
+    );
+
+    if !show.overview.is_empty() {
+        let style = text(19.2, 450, -0.005).leading(1.45);
+        out.text(
+            clamp_lines(assets, &show.overview, style, width, 2),
+            Rect::new(x, 262., width, 56.),
+            style,
+            c(0xeeeeee, 0.72),
+            false,
+        );
+    }
+}
+
+/// Review scores for the selected title, on one line from `x`; returns the width used, with a
+/// gap before what follows.
+fn hero_scores(
+    out: &mut Scene,
+    assets: &Assets,
+    scores: &crate::mdblist::Scores,
+    x: f32,
+    y: f32,
+) -> f32 {
+    let mut items: Vec<(&str, Color, String)> = Vec::new();
+    if let Some(critics) = scores.critics {
+        items.push((
+            "tomato",
+            if critics >= 60 {
+                c(0xf2412c, 1.)
+            } else {
+                c(0x8fb04a, 1.)
+            },
+            format!("{critics}%"),
+        ));
+    }
+    if let Some(audience) = scores.audience {
+        items.push(("popcorn", c(0xf6c344, 1.), format!("{audience}%")));
+    }
+    if let Some(imdb) = scores.imdb {
+        items.push(("star-filled", c(0xf5c518, 1.), format!("{imdb:.1}")));
+    }
+    if items.is_empty() {
+        return 0.;
+    }
+    let style = text(20.8, 650, -0.01).leading(1.4);
+    let mut cursor = x;
+    for (icon, color, label) in items {
+        out.icon(assets, icon, Rect::new(cursor, y + 4., 22., 22.), color);
+        let w = assets.width(&label, style) + 2.;
+        out.text(
+            label.as_str(),
+            Rect::new(cursor + 29., y + 1., w, 29.12),
+            style,
+            WHITE,
+            false,
+        );
+        cursor += 29. + w + 20.;
+    }
+    cursor - x + 12.
 }
 
 fn filter(out: &mut Scene, state: &State, target: Target, rect: Rect, label: &str, selected: bool) {
@@ -1690,7 +2389,7 @@ fn update_value(state: &State) -> String {
                     .t(if state.update_status == Status::Checking {
                         "checkingUpdates"
                     } else {
-                        "checkAgain"
+                        "checkNow"
                     })
                     .to_owned()
             }
@@ -2080,8 +2779,8 @@ fn location_settings(out: &mut Scene, state: &State, assets: &Assets) {
     }
 }
 
-fn settings(out: &mut Scene, state: &State, assets: &Assets) {
-    settings_content(out, state, assets);
+fn settings(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
+    settings_content(out, state, assets, now);
     settings_sidebar(out, state, assets);
 }
 
@@ -2144,6 +2843,7 @@ fn settings_sidebar(out: &mut Scene, state: &State, assets: &Assets) {
                 Some(Subpage::Clock) => language.t("clock"),
                 Some(Subpage::Language) => language.t("language"),
                 Some(Subpage::TextRendering) => language.t("textRendering"),
+                Some(Subpage::HomeAssistant) => language.t("homeAssistant"),
                 _ => "",
             };
             let mut path = vec![label];
@@ -2209,7 +2909,7 @@ fn settings_sidebar(out: &mut Scene, state: &State, assets: &Assets) {
     }
 }
 
-fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
+fn settings_content(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     let language = state.preferences.language;
     let s = state.scroll;
     if let Some(subpage) = &state.subpage {
@@ -2224,6 +2924,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                 | Subpage::Date
                 | Subpage::AppNames
                 | Subpage::Clock
+                | Subpage::HomeAssistant
         ) {
             match subpage {
                 Subpage::WeatherLocation => location_settings(out, state, assets),
@@ -2234,10 +2935,15 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                 Subpage::Date => date_settings(out, state, assets),
                 Subpage::AppNames => app_name_settings(out, state, assets),
                 Subpage::Clock => clock_settings(out, state, assets),
+                Subpage::HomeAssistant => home_assistant_settings(out, state, assets),
                 _ => unreachable!(),
             }
             if let Some(opened) = state.panel_started {
-                out.fade(start, (opened.elapsed().as_secs_f32() / 0.15).min(1.), 1.);
+                out.fade(
+                    start,
+                    (crate::clock::since(opened).as_secs_f32() / 0.15).min(1.),
+                    1.,
+                );
             }
             return;
         }
@@ -2283,6 +2989,11 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                         Some(language.t("inputWhenConnected")),
                         current == InputMode::Auto,
                     ),
+                    (
+                        language.t("stateAppsOnly"),
+                        Some(language.t("inputAppsOnly")),
+                        current == InputMode::Apps,
+                    ),
                 ]
             }
             Subpage::Temperature => vec![
@@ -2304,7 +3015,8 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             | Subpage::Greeting
             | Subpage::Date
             | Subpage::AppNames
-            | Subpage::Clock => {
+            | Subpage::Clock
+            | Subpage::HomeAssistant => {
                 unreachable!()
             }
             Subpage::Language => Language::ALL
@@ -2341,64 +3053,19 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             );
         }
         if let Subpage::Input(id) = subpage {
-            input_name_rows(out, state, assets, id, 164.8 + 3. * 102.7 + 16. - s);
+            input_name_rows(out, state, assets, id, 164.8 + 4. * 102.7 + 16. - s);
         }
         if let Some(opened) = state.panel_started {
-            out.fade(start, (opened.elapsed().as_secs_f32() / 0.15).min(1.), 1.);
+            out.fade(
+                start,
+                (crate::clock::since(opened).as_secs_f32() / 0.15).min(1.),
+                1.,
+            );
         }
         return;
     }
     match state.section {
-        0 => {
-            for (position, (index, key, icon, value, chevron)) in [
-                (0, "appNames", "type", None, true),
-                (1, "clock", "clock", None, true),
-                (4, "language", "language", Some(language.name()), true),
-                (
-                    2,
-                    "reducedMotion",
-                    "motion",
-                    Some(if state.preferences.reduced_motion {
-                        language.t("stateOn")
-                    } else {
-                        language.t("stateOff")
-                    }),
-                    false,
-                ),
-                (
-                    8,
-                    "homeAssistant",
-                    "tv",
-                    Some(if state.preferences.home_assistant {
-                        language.t("stateOn")
-                    } else {
-                        language.t("stateOff")
-                    }),
-                    false,
-                ),
-                (9, "homeAssistantSetup", "arrow", None, true),
-            ]
-            .into_iter()
-            .filter(|(index, ..)| *index != 9 || state.preferences.home_assistant)
-            .enumerate()
-            {
-                row(
-                    out,
-                    state,
-                    assets,
-                    Row {
-                        target: Target::Setting(index),
-                        rect: Rect::new(640., 164.8 + position as f32 * 84. - s, 1120., 72.),
-                        title: language.t(key),
-                        icon: Some(icon),
-                        value,
-                        description: None,
-                        selected: false,
-                        chevron,
-                    },
-                );
-            }
-        }
+        0 => update_row(out, state, assets, now),
         1 => {
             let actions_start = out.draw.len();
             let upload_label = language.t("uploadWallpaper");
@@ -2526,7 +3193,8 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
         }
         WIDGETS_SECTION => {
             for (index, (widget, key, icon)) in [
-                (4, "date", "clock"),
+                (5, "clock", "clock"),
+                (4, "date", "calendar"),
                 (0, "greeting", "type"),
                 (1, "weather", "weather-sun"),
                 (2, "shortcuts", "sparkles"),
@@ -2553,65 +3221,86 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             }
         }
         SYSTEM_SECTION => {
-            let rect = Rect::new(640., 164.8 - s, 1120., 220.);
-            let title = if matches!(state.update, crate::update::InstallStatus::Failed(_)) {
-                "updateError"
-            } else if state.available_update.is_some() {
-                "updateAvailable"
-            } else {
-                match state.update_status {
-                    crate::update::Status::Unchecked => "checkForUpdates",
-                    crate::update::Status::Checking => "checkingUpdates",
-                    crate::update::Status::Checked => "latestVersionInstalled",
-                    crate::update::Status::Failed => "updateCheckFailed",
-                }
-            };
-            settings_surface(out, rect, 20.);
-            out.text(
-                language.t(title),
-                Rect::new(rect.x + 24.2, rect.y + 24., rect.w - 48.4, 34.),
-                text(24., 550, -0.02).leading(1.4),
-                WHITE,
-                false,
-            );
-            out.text(
-                if let Some(latest) = &state.available_update {
-                    language.format(
-                        "updateVersions",
-                        &[("current", assets.version.trim()), ("latest", latest)],
-                    )
-                } else {
-                    language.format("currentVersion", &[("current", assets.version.trim())])
-                },
-                Rect::new(rect.x + 24.2, rect.y + 74., rect.w - 48.4, 32.),
-                text(20.8, 450, -0.02).leading(1.4),
-                c(0xeeeeee, 0.73),
-                false,
-            );
             row(
                 out,
                 state,
                 assets,
                 Row {
-                    target: if state.available_update.is_some() {
-                        Target::InstallUpdate
-                    } else {
-                        Target::CheckUpdates
-                    },
-                    rect: Rect::new(rect.x + 24., rect.y + 132., rect.w - 48., 64.),
-                    title: &update_value(state),
-                    icon: Some(if state.available_update.is_some() {
-                        "arrow"
-                    } else {
-                        "refresh"
-                    }),
+                    target: Target::TvSettings,
+                    rect: Rect::new(640., 164.8 - s, 1120., 72.),
+                    title: language.t("tvSettings"),
+                    icon: Some("settings"),
                     value: None,
                     description: None,
                     selected: false,
-                    chevron: false,
+                    chevron: true,
                 },
             );
+            let on_off = |on: bool| language.t(if on { "stateOn" } else { "stateOff" });
             for (position, (index, title, icon, value, chevron)) in [
+                (0, language.t("appNames"), "type", None, true),
+                (
+                    4,
+                    language.t("language"),
+                    "language",
+                    Some(language.name()),
+                    true,
+                ),
+                (
+                    2,
+                    language.t("reducedMotion"),
+                    "motion",
+                    Some(on_off(state.preferences.reduced_motion)),
+                    false,
+                ),
+                (
+                    11,
+                    language.t("lumaAsHome"),
+                    "luma-mark",
+                    Some(on_off(state.preferences.luma_home)),
+                    false,
+                ),
+                (
+                    12,
+                    language.t("updateChannel"),
+                    "refresh",
+                    Some(language.t(if state.preferences.nightly_updates {
+                        "updateChannelNightly"
+                    } else {
+                        "updateChannelReleases"
+                    })),
+                    false,
+                ),
+                (
+                    8,
+                    language.t("homeAssistant"),
+                    "tv",
+                    Some(on_off(state.preferences.home_assistant)),
+                    true,
+                ),
+                (
+                    10,
+                    language.t("streamingKeys"),
+                    "search",
+                    Some(language.t(
+                        match (state.streaming_keys.motn, state.streaming_keys.tmdb) {
+                            (true, true) if state.streaming_keys.home_assistant => {
+                                "streamingKeysFromHomeAssistant"
+                            }
+                            (true, true) => "streamingKeysSet",
+                            (false, false) => "streamingKeysNotSet",
+                            _ => "streamingKeysPartial",
+                        },
+                    )),
+                    true,
+                ),
+                (
+                    7,
+                    language.t("textRendering"),
+                    "type",
+                    Some(language.t(state.preferences.text_rendering.label_key())),
+                    true,
+                ),
                 (
                     3,
                     language.t(if state.loading {
@@ -2622,13 +3311,6 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     "refresh",
                     None,
                     false,
-                ),
-                (
-                    7,
-                    language.t("textRendering"),
-                    "type",
-                    Some(language.t(state.preferences.text_rendering.label_key())),
-                    true,
                 ),
                 (5, language.t("quitApp"), "power", None, false),
             ]
@@ -2641,7 +3323,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     assets,
                     Row {
                         target: Target::Setting(index),
-                        rect: Rect::new(640., 408.8 + position as f32 * 84. - s, 1120., 72.),
+                        rect: Rect::new(640., 248.8 + position as f32 * 84. - s, 1120., 72.),
                         title,
                         icon: Some(icon),
                         value,
@@ -2653,6 +3335,153 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             }
         }
         _ => {}
+    }
+}
+
+/// One line: the installed version and when it was last checked, with the
+/// check or install action as a button on the right.
+fn update_row(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
+    use crate::update::{InstallStatus, Status};
+    let language = state.preferences.language;
+    let rect = Rect::new(640., 164.8 - state.scroll, 1120., 72.);
+    settings_surface(out, rect, 20.);
+    let version = assets.version.trim();
+    let status = if matches!(state.update, InstallStatus::Failed(_)) {
+        language.t("updateInstallFailed").to_owned()
+    } else if let Some(latest) = &state.available_update {
+        language.format("updateReady", &[("latest", latest)])
+    } else {
+        match (state.update_status, state.update_checked) {
+            (Status::Checking, _) => language.t("checkingUpdates").to_owned(),
+            (Status::Failed, _) => language.t("updateCheckFailed").to_owned(),
+            (Status::Checked, Some(checked)) => {
+                let ago = crate::state::unix_now().saturating_sub(checked);
+                let at = now - time::Duration::seconds(ago.min(i64::MAX as u64) as i64);
+                let mut when = language.clock(at, state.preferences.hour_24, false);
+                // A launcher can run for days; name the day once it is not today.
+                if at.date() != now.date() {
+                    when = format!(
+                        "{} {when}",
+                        state.preferences.date_format.format(language, at)
+                    );
+                }
+                language.format("lastChecked", &[("time", &when)])
+            }
+            _ => language.t("notChecked").to_owned(),
+        }
+    };
+    let (target, icon) = if state.available_update.is_some() {
+        (Target::InstallUpdate, "arrow")
+    } else {
+        (Target::CheckUpdates, "refresh")
+    };
+    let label = update_value(state);
+    let style = text(18.4, 550, -0.01);
+    // Sized for its widest label so progress text never moves the button.
+    let install = language.format(
+        "installUpdate",
+        &[("version", state.available_update.as_deref().unwrap_or(""))],
+    );
+    let downloading = language.format("updateDownloading", &[("percent", "100")]);
+    let button_width = [
+        language.t("checkNow"),
+        language.t("checkingUpdates"),
+        language.t("updateInstalling"),
+        language.t("updateFailed"),
+        &install,
+        &downloading,
+    ]
+    .into_iter()
+    .map(|label| assets.width(label, style))
+    .fold(0., f32::max);
+    let button_width = (button_width + 82.).ceil().min(460.);
+    let button = Rect::new(
+        rect.x + rect.w - 12. - button_width,
+        rect.y + 10.,
+        button_width,
+        52.,
+    );
+    let line = format!("{version} · {status}");
+    let line_width = button.x - rect.x - 48.4;
+    out.text(
+        &line,
+        Rect::new(rect.x + 24.2, rect.y + 23.5, line_width, 25.),
+        assets.fit_text(&line, text(20.8, 550, -0.02), line_width),
+        WHITE,
+        false,
+    );
+    let focused = state.focus == target;
+    out.pill(button, focused, false);
+    let color = if focused {
+        c(0x2c2c2c, 1.)
+    } else {
+        c(0xeeeeee, 0.85)
+    };
+    out.icon(
+        assets,
+        icon,
+        Rect::new(button.x + 20., button.y + 17., 18.4, 18.4),
+        color,
+    );
+    out.text(
+        &label,
+        Rect::new(button.x + 48., button.y + 14., button.w - 60., 25.),
+        style,
+        color,
+        false,
+    );
+    out.control(target, button, false);
+}
+
+fn home_assistant_settings(out: &mut Scene, state: &State, assets: &Assets) {
+    let language = state.preferences.language;
+    row(
+        out,
+        state,
+        assets,
+        Row {
+            target: Target::HomeAssistantToggle,
+            rect: Rect::new(640., 164.8 - state.scroll, 1120., 90.7),
+            title: language.t("homeAssistant"),
+            icon: None,
+            value: Some(language.t(if state.preferences.home_assistant {
+                "stateOn"
+            } else {
+                "stateOff"
+            })),
+            description: Some(language.t("homeAssistantToggleHint")),
+            selected: false,
+            chevron: false,
+        },
+    );
+    if state.preferences.home_assistant {
+        // The setup page's code opens HACS, where an outdated integration is updated.
+        let outdated = (!state.home_assistant_outdated.is_empty()).then(|| {
+            language.format(
+                "homeAssistantOutdated",
+                &[("name", &state.home_assistant_outdated.join(", "))],
+            )
+        });
+        row(
+            out,
+            state,
+            assets,
+            Row {
+                target: Target::HomeAssistantCode,
+                rect: Rect::new(
+                    640.,
+                    267.5 - state.scroll,
+                    1120.,
+                    if outdated.is_some() { 90.7 } else { 72. },
+                ),
+                title: language.t("homeAssistantSetup"),
+                icon: None,
+                value: None,
+                description: outdated.as_deref(),
+                selected: false,
+                chevron: true,
+            },
+        );
     }
 }
 
@@ -2686,6 +3515,7 @@ fn inputs_settings(out: &mut Scene, state: &State, assets: &Assets) {
                     InputMode::On => "stateOn",
                     InputMode::Off => "stateOff",
                     InputMode::Auto => "stateAuto",
+                    InputMode::Apps => "stateAppsOnly",
                 })),
                 description: Some(&input_status(
                     input,
@@ -3193,18 +4023,31 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str, anchor: Op
         })
     );
     let background = matches!(state.overlay, Some(Overlay::BackgroundOptions { .. }));
-    let app = state.inventory.apps.iter().find(|app| app.id == id);
-    let favorite = state
-        .preferences
-        .favorites(&state.inventory.apps)
+    let input = state.is_input(id);
+    let input_face = state.input_app(id);
+    let app = state
+        .inventory
+        .apps
         .iter()
-        .any(|item| item == id);
-    let deletable = if background {
+        .find(|app| app.id == id)
+        .or(input_face.as_ref());
+    let favorite = if input {
+        state.input_favorite(id)
+    } else {
+        state
+            .preferences
+            .favorites(&state.inventory.apps)
+            .iter()
+            .any(|item| item == id)
+    };
+    let deletable = if input {
+        false
+    } else if background {
         state.can_delete_background(id) && state.deleting_wallpaper.is_none()
     } else {
         crate::platform::can_uninstall(id)
     };
-    let height = if shortcut {
+    let height = if shortcut || input {
         176.
     } else if background {
         if deletable { 176. } else { 99.2 }
@@ -3260,6 +4103,19 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str, anchor: Op
             actions.push((Target::DeleteBackground, language.t("deleteBackground")));
         }
         actions
+    } else if input {
+        // Inputs are not installed apps: no hide or delete, only Home membership.
+        vec![
+            (Target::OpenApp, language.t("open")),
+            (
+                Target::Option(0),
+                language.t(if favorite {
+                    "removeFavorite"
+                } else {
+                    "addFavorite"
+                }),
+            ),
+        ]
     } else {
         vec![
             (Target::OpenApp, language.t("open")),
@@ -3350,7 +4206,7 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str, anchor: Op
     if let Some(opened) = state.panel_started {
         out.fade(
             panel_start,
-            (opened.elapsed().as_secs_f32() / 0.12).min(1.),
+            (crate::clock::since(opened).as_secs_f32() / 0.12).min(1.),
             1.,
         );
     }
@@ -3489,7 +4345,9 @@ fn keyboard(out: &mut Scene, state: &State, assets: &Assets) {
             TextField::Location => language.t("cityPostcode"),
             TextField::Name => language.t("greetingName"),
             TextField::InputName => language.t("inputName"),
+            TextField::CameraName => language.t("cameraName"),
             TextField::Apps => language.t("findApp"),
+            TextField::Titles => language.t("moviesAndShows"),
         },
         Rect::new(389., 324., 1000., 44.),
         text(37.6, 500, -0.055).leading(1.1),
@@ -3576,7 +4434,11 @@ fn toast(out: &mut Scene, state: &State, assets: &Assets, notice: &str) {
     if !state.preferences.reduced_motion
         && let Some((_, opened)) = &state.notice
     {
-        out.fade(start, (opened.elapsed().as_secs_f32() / 0.12).min(1.), 1.);
+        out.fade(
+            start,
+            (crate::clock::since(*opened).as_secs_f32() / 0.12).min(1.),
+            1.,
+        );
     }
 }
 
@@ -3682,7 +4544,7 @@ mod tests {
             let label = language.t("uploadWallpaper");
             let label_width = assets.width(label, text(20.8, 550, -0.02));
             let mut scene = Scene::new();
-            settings(&mut scene, &state, &assets);
+            settings(&mut scene, &state, &assets, OffsetDateTime::UNIX_EPOCH);
             let button = scene
                 .controls
                 .iter()
@@ -3713,7 +4575,7 @@ mod tests {
         for enabled in [false, true] {
             state.preferences.wallpaper_cycle = enabled;
             let mut scene = Scene::new();
-            settings(&mut scene, &state, &assets);
+            settings(&mut scene, &state, &assets, OffsetDateTime::UNIX_EPOCH);
             let button = scene
                 .controls
                 .iter()

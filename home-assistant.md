@@ -13,26 +13,37 @@ Assistant calls the TV; the TV never needs your Home Assistant password.
 ## What you get
 
 - **`luma.show_camera`**: a camera card in a corner of the screen with a title, an optional second
-  line and a countdown. **Back** on the remote closes it early; otherwise it closes after its
-  duration. Choose whether the show keeps playing underneath or pauses until the card closes.
+  line and a countdown. **OK** on the remote shows the camera full screen; **Back** closes it;
+  otherwise it closes after its duration.
+  Choose whether the show keeps playing underneath or pauses until the card closes.
 - **`luma.dismiss`** and a **Dismiss overlay** button: close the card from Home Assistant, for
   example when the door opens.
 - **`luma.notify`** and a **Toast** notify entity: a standard webOS toast over any app.
+- **A Cameras app** in Luma: every Home Assistant camera in a full-screen grid. Arrows choose a
+  camera, **OK** shows it full screen, **Back** returns to the grid and then closes it. Hold
+  **OK** on a camera to move, rename or hide it; the settings button shows hidden cameras again.
+  Five or more cameras show three across and two rows at a time; scroll down for the rest.
+- **Type on your phone**: when a text field opens on the TV, such as search, your phone gets a
+  notification. Reply to it and the text goes into the field, without opening an app or picking
+  letters with the remote. See [Type on your phone](#type-on-your-phone).
+- **Show example camera card** and **Show example toast** buttons: press them on the TV's device
+  page to see what each popup looks like, before writing any automation. The example card shows a
+  picture of a front door that comes with the integration, so it works without a camera.
 
 ## Set up
 
-1. **On the TV**, open **Luma → Settings → General** and turn on **Home Assistant**. Luma shows a
+1. **On the TV**, open **Luma → Settings → System → Home Assistant** and turn it on. Luma shows a
    QR code and the address Home Assistant should use (for example `192.168.1.50:5862`). The first
    time, Luma also installs its small overlay app from its own package. This needs Homebrew
    Channel's root service, like Luma's other TV features. To see the QR code again later, choose
-   **Add to Home Assistant** below the setting.
+   **Add to Home Assistant** on the same page.
 2. **Install the integration** (you need [HACS](https://hacs.xyz)):
    - **From the QR code:** scan it with your phone. It opens HACS on your Home Assistant with
      **Luma for LG webOS** ready to download, through the
      [My Home Assistant](https://my.home-assistant.io) link
-     `https://my.home-assistant.io/redirect/hacs_repository/?owner=EliSchleifer&repository=lg-luma&category=integration`.
+     `https://my.home-assistant.io/redirect/hacs_repository/?owner=elischleifer-trunk&repository=lg-luma&category=integration`.
      The first time, My Home Assistant asks for your Home Assistant's address.
-   - **By hand in HACS:** add `https://github.com/EliSchleifer/lg-luma` as a custom repository of
+   - **By hand in HACS:** add `https://github.com/elischleifer-trunk/lg-luma` as a custom repository of
      type _Integration_, then download **Luma for LG webOS**.
    - **Without HACS:** copy `custom_components/luma` from this repository into your Home Assistant
      `config/custom_components/` folder.
@@ -43,11 +54,18 @@ Assistant calls the TV; the TV never needs your Home Assistant password.
    LG webOS TV integration. Otherwise, add **Luma for LG webOS** under **Settings → Devices &
    services** and enter the TV's address. When you already use the LG webOS TV integration, its
    address and name are suggested.
-4. The TV shows a **six-digit pairing code**. Type it into Home Assistant. Codes expire after two
-   minutes, and five wrong codes cancel the request.
+4. The TV shows a **six-digit pairing code**. Type it into Home Assistant. If Luma is on screen,
+   the code replaces the QR code in the **Add to Home Assistant** dialog, which opens by itself
+   if needed, and stays until you pair. Codes expire after two minutes, and five wrong codes
+   cancel the request.
+
+5. To check it works, open the TV under **Settings → Devices & services → Luma for LG webOS** and
+   press **Show example camera card** and **Show example toast**. The card closes after 15
+   seconds, or press **Back** on the remote.
 
 Turning **Home Assistant** off in Luma closes the port and forgets every paired server. Home
-Assistant then asks you to pair again the next time it is needed. Removing the integration in Home
+Assistant then asks you to pair again the next time it is needed. Your camera names, order and
+hidden cameras are kept, and come back when the same Home Assistant pairs again. Removing the integration in Home
 Assistant also unpairs it from the TV when the TV is on.
 
 ## Camera images
@@ -67,8 +85,95 @@ The TV loads camera images itself, so the address must be reachable from the TV.
   snapshot_url: http://192.168.1.10:1984/api/frame.jpeg?src=front_door
   ```
 
-The TV shows motion-JPEG and JPEG only. It does not decode RTSP/H.264, so the TV's video decoder
-stays with the show you are watching.
+For a camera entity, the card plays Home Assistant's HLS stream: the camera's own video at its
+full frame rate, muted, decoded by the TV, a second or two behind real time (see
+[Live video in the card](#live-video-in-the-card)). Otherwise it shows motion-JPEG or JPEG;
+`mode: stream` keeps a camera entity on motion-JPEG, so the TV's video decoder stays with the show
+you are watching.
+
+## Cameras app
+
+While **Home Assistant** is on, Luma lists a **Cameras** app with your other apps. Favorite it to
+keep it on Home. Opening it shows every camera entity Home Assistant has (Frigate's, which repeat cameras another
+integration already provides, start hidden; unavailable ones are
+skipped, at most 32) in a grid of snapshots that refresh every couple of seconds. Choose a camera
+and press **OK** to see it full screen as live video; **Back** returns to the grid, and **Back**
+again closes it.
+
+Full screen, a camera that can stream (most RTSP cameras: Generic, ONVIF, Reolink, UniFi Protect
+and others) plays Home Assistant's HLS stream: the camera's own video at its full frame rate,
+decoded by the TV, a second or two behind real time. This needs Home Assistant's **Stream**
+integration, which `default_config` includes. Other cameras, and any camera while its stream is
+starting or if it cannot play, show Home Assistant's motion-JPEG stream, which for most camera
+types is only about two pictures a second. Its badge says **Live** or **Snapshots**: if that
+stream fails or freezes, Luma switches to snapshots, several a second.
+
+On TVs with LG's direct video decoder (webOS 5 and later), Luma plays the camera's own video
+itself instead: Home Assistant passes the camera's stream straight on, starting from its last
+keyframe, so the picture appears almost at once. This video has no sound yet. If it cannot play,
+Luma uses the HLS stream described here.
+
+Home Assistant needs a few seconds to connect to a camera and prepare its first video, so Luma
+asks it to start as soon as a camera is focused in the grid: a camera you rest on for several
+seconds before pressing **OK** goes live almost at once. Two Home Assistant settings shorten the
+wait further:
+
+- Shorter video segments. Home Assistant offers no video until one whole segment is ready, six
+  seconds by default. In `configuration.yaml`, then restart Home Assistant:
+
+  ```yaml
+  stream:
+    segment_duration: 2
+  ```
+
+- **Preload stream**, in a camera entity's settings in Home Assistant, keeps that camera's
+  stream running all the time, so it is always ready. This uses Home Assistant's processor and
+  network continuously; choose it for the cameras you open most.
+
+### Rewinding and history
+
+A full-screen camera can be rewound. A bar along the bottom shows how far back you can go, with
+live at the right end:
+
+| Key                                                  | What it does                                                                                             |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **Left** / **Right**                                 | 10 seconds back or forward; hold to go faster (a minute, then five minutes, then half an hour at a time) |
+| **OK**                                               | Pause, and play again                                                                                    |
+| **Up** / **Down**                                    | The previous or next thing UniFi Protect saw (UniFi Protect cameras)                                     |
+| **Rewind** / **Fast-forward**                        | Play backward or forward at 2×, 4×… up to 64×                                                            |
+| **Right** to the end, or **Down** past the last mark | Back to live                                                                                             |
+| **Back**                                             | Back to the grid                                                                                         |
+
+The TV keeps the last two minutes of every camera you watch. **UniFi Protect cameras go back 24
+hours**, into what Protect recorded, including before you opened the camera. Scrubbing shows
+Protect's picture from each moment, and pressing **OK** (or stopping on a moment while playing)
+plays Protect's recorded video. Coloured marks on the bar show what Protect saw: people (blue),
+vehicles (orange), animals (green), packages (purple), doorbell rings (bright green) and other
+motion (grey). A camera set to record only on motion has gaps; **Nothing recorded at this time**
+shows there.
+
+This needs Home Assistant's **UniFi Protect** integration and, for the marks, Home Assistant's
+**Recorder** (part of `default_config`), which keeps the history of the camera's motion and
+detection sensors. Nothing else needs setting up: the Luma integration gives the TV a link per
+camera that checks the camera's access token, then hands the TV a short-lived link that Home
+Assistant signs for the UniFi Protect integration's own recording views, the same way Home
+Assistant's media browser plays Protect recordings. The TV never holds Home Assistant or Protect
+credentials.
+
+### Arranging the grid
+
+To arrange the grid, hold **OK** on a camera: **Move** lets you move it with the arrows (**OK**
+when done), **Hide camera** takes it off the grid, and **Camera settings** opens settings, which
+the settings button at the top right also opens (press **Up** from the first row). There you can
+show hidden cameras again and turn **Live video** off, so full-screen cameras use snapshots,
+which suits cameras whose stream is slow in Home Assistant. Luma remembers the arrangement.
+
+Nothing needs setting up: the integration sends the TV its camera list when it starts and again
+whenever a camera changes, including every few minutes when Home Assistant rotates camera access
+tokens, so the URLs the TV holds keep working. Like camera overlays, the TV loads the images from
+Home Assistant's **local network URL**. The TV keeps the list in memory only; after it restarts,
+Home Assistant notices within a minute and sends the list again. With several Home Assistant
+servers paired, the app shows all of their cameras.
 
 ## Doorbell example
 
@@ -104,17 +209,45 @@ automation:
 Leave out `config_entry_id` to show the camera on every paired TV, or pick one TV in the action
 editor.
 
-| Field                        | Default     | Notes                                                          |
-| ---------------------------- | ----------- | -------------------------------------------------------------- |
-| `camera`                     |             | A camera entity; or give `stream_url` / `snapshot_url`.        |
-| `stream_url`, `snapshot_url` |             | Absolute `http(s)` URLs the TV can load.                       |
-| `mode`                       | `stream`    | `stream` (motion-JPEG, falls back to snapshots) or `snapshot`. |
-| `refresh`                    | `1`         | Seconds between snapshots, 0.25–30.                            |
-| `title`, `message`           | camera name | Up to 80 and 200 characters.                                   |
-| `duration`                   | `30`        | Seconds, 5–600.                                                |
-| `position`                   | `top-right` | Any corner.                                                    |
-| `size`                       | `medium`    | `small` (480 px), `medium` (640 px) or `large` (800 px).       |
-| `pause`                      | `false`     | Pause playback until the card closes.                          |
+| Field                        | Default     | Notes                                                    |
+| ---------------------------- | ----------- | -------------------------------------------------------- |
+| `camera`                     |             | A camera entity; or give `stream_url` / `snapshot_url`.  |
+| `stream_url`, `snapshot_url` |             | Absolute `http(s)` URLs the TV can load.                 |
+| `mode`                       | `video`     | `video` (HLS), `stream` (motion-JPEG) or `snapshot`.     |
+| `refresh`                    | `1`         | Seconds between snapshots, 0.25–30.                      |
+| `title`, `message`           | camera name | Up to 80 and 200 characters.                             |
+| `duration`                   | `30`        | Seconds, 5–600.                                          |
+| `position`                   | `top-right` | Any corner.                                              |
+| `size`                       | `medium`    | `small` (480 px), `medium` (640 px) or `large` (800 px). |
+| `pause`                      | `false`     | Pause playback until the card closes.                    |
+
+### Live video in the card
+
+With a camera entity that can stream (most RTSP cameras, including UniFi
+Protect), Home Assistant starts the camera's HLS stream when the card is requested. The card shows
+the motion-JPEG while the video starts, which usually takes a few seconds, then switches to the
+video. A camera that cannot stream, a video that does not play within 15 seconds, or one that
+stops, keeps or goes back to the motion-JPEG. Like the Cameras app, this needs Home Assistant's
+**Stream** integration. The video is muted.
+
+The card's video uses the TV's video decoder while something else is playing. Whether the show
+underneath keeps playing smoothly depends on the TV model and firmware. If it does not, use
+`mode: stream`, or `pause: true`. Please report what works on yours.
+
+To peek at a camera any time, as if the doorbell rang, call the same action from a script and put
+it on a dashboard:
+
+```yaml
+script:
+  peek_front_door:
+    alias: Peek at front door
+    icon: mdi:doorbell-video
+    sequence:
+      - action: luma.show_camera
+        data:
+          camera: camera.front_door_medium_resolution_channel
+          message: Live view
+```
 
 A second ring while the card is showing replaces it. When the first ring paused the show, it stays
 paused until the replacement closes.
@@ -124,10 +257,177 @@ through webOS's media service (most streaming apps) pause; Live TV and apps with
 may keep playing. To pause such apps another way, call `media_player.media_pause` on the LG webOS TV
 entity before `luma.show_camera`.
 
+## Type on your phone
+
+Typing with the remote is slow. With the [Home Assistant app](https://companion.home-assistant.io)
+on your phone, Luma can ask you for the text instead:
+
+1. In Home Assistant, open **Settings → Devices & services → Luma → Configure → Type on your
+   phone** and tick the phones that should be asked. Every phone signed in to the Home Assistant
+   app is listed.
+2. On the TV, open a text field: app search, Movies & shows search, a weather location, your name
+   or a new name for an input
+   or camera.
+3. The phones get a notification from the TV. Tap it: the Home Assistant app opens on a page with
+   one text box. Type and send. The text goes into the field, and the TV's keyboard closes.
+   To stay out of the app, reply to the notification instead (on iPhone, press and hold it or
+   swipe down; on Android, tap **Type**).
+
+### From a dashboard
+
+Tick **Type from Home Assistant too** on the same page, with or without phones. The TV then gets a
+**TV keyboard** text entity. It is available only while a text field is open on the TV; its
+`field` and `prompt` attributes say what the TV is asking for (for example `search` and
+"Search"). Setting its value types the text into the field and closes the TV's keyboard. Put it on
+a dashboard, in a conditional card that shows only while it is available, to get a type-to-TV box
+just when the TV asks for text. Unticking it removes the entity.
+
+The page is `/luma-keyboard` in Home Assistant, for any signed-in user. It is not in the sidebar,
+but you can open it by hand or link to it from a dashboard; with several TVs it lets you choose one.
+
+Closing the field on the TV clears the notification. On Android the notifications have their own
+**Luma keyboard** channel, so you can change their sound or silence them in the phone's settings.
+
+The TV tells Home Assistant about text fields through a webhook that only accepts calls from your
+local network. It only sends which kind of field opened, never what you typed on the TV. Typed text
+comes back over the same paired connection as everything else. Turning it off (no phones ticked
+and no TV keyboard entity) tells the TV to stop. Home Assistant needs a **local network URL** the TV can reach (**Settings →
+System → Network**), as for camera images.
+
+## Streaming search keys
+
+Luma's streaming search uses a Movie of the Night key (where shows stream), a TMDB API Read
+Access Token (how prominent they are) and, optionally, an MDBList API key (Rotten Tomatoes and
+IMDb scores on each poster). Enter them once in Home Assistant: **Settings → Devices &
+services → Luma → Configure**. Each new key is checked with its service when you save, then sent
+to the TV. Home Assistant is their source of truth: it sends them again if the TV loses them, for
+example after a reset, or if they were changed on the TV. Clearing a field in Home Assistant
+leaves the TV's key in place. Without Home Assistant, enter them on the TV under **Settings →
+System → Streaming search keys**, which shows a QR code for your phone.
+
+## Criterion Channel account
+
+Luma's Criterion Channel player can sign in by itself, so nobody types a password with the
+remote. Open **Settings → Devices & services → Luma → Configure → Criterion Channel account** and
+enter the email and password you use on criterionchannel.com. Home Assistant sends them to the
+TV, and again when the TV holds none (after a reset) or one this server sent before (a change
+made while the TV was off). Clear both fields to remove them: the TV drops its copy at the next status check,
+within a minute or so. With several Home Assistant servers paired, none replaces or removes an
+account another one sent. Unpairing the TV's last server also removes it, and diagnostics downloads redact it.
+
+The password is stored in Home Assistant's configuration storage and in a file on the TV that
+only Luma can read, like the streaming search keys. The TV never logs it and gives it only to
+its own Criterion player, on the Channel's sign-in page (`login.criterion.com`), in exchange for
+a one-time code Luma handed the player with the film. If the Channel ever asks the player to
+prove it is human, finish that sign-in once with the remote.
+
+## Developer access
+
+For people developing Luma. Off by default, and nothing changes until you turn it on: the
+endpoints below answer 404 and the SSH library (asyncssh) is not even installed.
+
+It lets a cloud development session (such as Claude Code on the web) SSH to the TV as root for up
+to 8 hours, only after you tap **Approve** on your phone:
+
+1. The session sends its **dev token** to `POST /api/luma/dev/request` with a reason. The token
+   says which TV.
+2. Home Assistant sends the phone you chose a notification with **Approve** and **Deny**. Only
+   that tap can approve; unanswered requests expire after 10 minutes.
+3. On approval Home Assistant makes a new SSH key, adds it to the TV's
+   `/home/root/.ssh/authorized_keys` over your network (keys it adds cannot forward ports), and
+   checks the TV accepts it.
+4. The session receives, once: the key, how to reach the TV (a Cloudflare Access tunnel hostname
+   and service token, or the TV's address), and the streaming search keys.
+5. The key is removed when the session releases it, when it expires, or by a check every 15
+   minutes. Lines in `authorized_keys` that Home Assistant did not add are never touched.
+
+To turn it on: **Settings → Devices & services → Luma → Configure → Developer access.** Tick
+**Allow developer access**, choose the phone that approves, and optionally a tunnel hostname and
+Cloudflare service token. Submitting shows two things once:
+
+- the **dev token**: give it to the development environment as `LUMA_DEV_TOKEN`. It can only ask;
+  ten wrong tokens in an hour lock the endpoints for an hour and notify your phone.
+- **Home Assistant's key line**: append it to `/home/root/.ssh/authorized_keys` on the TV, so Home
+  Assistant can add and remove session keys.
+
+While developer access is on, the TV's device page has:
+
+- **Developer access**, a sensor: _Idle_, _Waiting for approval_, or _Session key on the TV_. Its
+  attributes list the last 20 requests (reason, how long, when, the outcome and who decided), and
+  its history in the Logbook is a record of every request.
+- **Approve developer access request** and **Deny developer access request**: answer the oldest
+  waiting request, the same as the buttons on your phone. They are unavailable while nothing is
+  waiting.
+- **Revoke all developer access**: takes every session key off the TV now and leaves the feature
+  on.
+
+Each request also appears in Home Assistant's notifications with a link to that page, and goes
+away once it is answered or expires. On an iPhone, press and hold the phone notification to see
+Approve and Deny; tapping it only opens it.
+
+The same page makes a new dev token (the old one stops working at once) and forgets the TV's SSH
+host key after a TV reset; Home Assistant pins it on first contact and refuses to continue if it
+changes. From a session, `node tools/tv-access.mjs request` asks and sets up `ssh tv`; see
+`agents.md`.
+
+## Keeping Luma and the integration in step
+
+Home Assistant's device page for the TV shows which Luma version it runs. When the TV and the
+integration no longer fit together, both say which one to update:
+
+- **Luma on the TV is too old:** Home Assistant shows **Update Luma on _TV_** under **Settings →
+  Repairs**. Update Luma from its settings on the TV.
+- **The integration is too old:** Home Assistant shows **Update the Luma integration for _TV_**
+  under Repairs, Luma shows a notice, and **Settings → System → Home Assistant** on the TV names
+  the server. Update **Luma for LG webOS** in HACS and restart Home Assistant.
+
+Both notices go away on their own once the update is installed. They compare API levels, not
+release versions, so an ordinary release of either side never raises them.
+
 ## While the card is showing
 
-The card has key focus, so **Back** closes it. Other remote keys, such as play/pause, may not reach
+The card has key focus, so **Back** closes it and **OK** shows the camera full screen: its live
+video, or its motion-JPEG feed when it has none, with no countdown. Full screen, **Back** or **OK**
+closes it, and a paused show resumes. Other remote keys, such as play/pause, may not reach
 the app underneath until it closes. How webOS routes keys to overlay windows depends on firmware.
+
+## What the TV reports
+
+The TV tells Home Assistant what went wrong and how smoothly Luma is running. Home Assistant
+keeps a live connection to it while the TV is on, and catches up on anything it missed after it
+restarts or the TV wakes up.
+
+- **Home Assistant's log** (**Settings → System → Logs**) shows Luma's warnings and errors, such
+  as a camera that has no HLS stream or a camera card that did not open, under
+  `custom_components.luma.tv`. To see everything Luma records, including what went right (startup
+  timings, how long each camera card took to open), add this to `configuration.yaml`:
+
+  ```yaml
+  logger:
+    logs:
+      custom_components.luma.tv: info
+  ```
+
+- **Diagnostic sensors** on the TV's device page:
+  - **Frame time**: the 95th percentile of how long a frame took to draw, in milliseconds.
+  - **Dropped frames**: frames that missed a refresh while Luma was animating.
+  - **Memory** and **CPU**: how much Luma uses.
+  - **Last problem**: the last warning or error.
+
+  Luma reports these once a minute while it is drawing and every ten minutes when idle. Home
+  Assistant's history graphs them over time.
+
+- **A `luma_event` event** for each entry, with `level` (`info`, `warning` or `error`), `area`
+  (such as `cameras`, `overlay` or `inventory`), `message`, `time`, `device_id` (the TV's device)
+  and `config_entry_id`.
+  Automations can use it, for example to send you a notification when Luma logs an error.
+- **Download diagnostics** on the TV's device page saves one file with everything together: the
+  history Home Assistant kept (the last 1,000 entries and 12 hours of performance), and what the
+  TV still holds. Attach it when you report a problem. Tokens and keys are removed from it.
+
+The TV keeps its last 500 entries in memory. If Home Assistant is away long enough for more than
+that to pile up, the log says some were lost. If Luma stops because of an internal error, it
+reports the error the next time it starts.
 
 ## Security
 
@@ -139,22 +439,48 @@ the app underneath until it closes. How webOS routes keys to overlay windows dep
   one exception is the overlay app reporting that it closed, which is accepted only from the TV
   itself and only with that overlay's random nonce.
 - Camera URLs must be `http` or `https`. The TV loads them as images only.
+- Besides loading the camera images and video Home Assistant signs for it, the keyboard webhook
+  is the only call the TV makes to Home Assistant on its own. The TV keeps it in memory and sends it
+  `{"open": true, "field": "search"}` or `{"open": false}`. Home Assistant only accepts it from the
+  local network. (Shortcut tiles you set up can also call Home Assistant webhooks.)
+- Streaming search keys are stored on the TV in a file only Luma can read. The API never sends
+  them back: `status` only says which keys the TV holds.
+- What the TV reports about itself goes only to paired servers. Unpairing a server ends its
+  event stream.
 
 ## API
 
 Home Assistant uses this API. You can script it too: send JSON bodies, with
 `Authorization: Bearer TOKEN` on every endpoint except `info` and the two pairing steps.
+Home Assistant also sends `X-Luma-Integration: LEVEL`, its integration's API level; requests
+without it count as level 1. `api` in a reply is the TV's own API level and `min_integration`
+the lowest integration level it works with.
 
-| Endpoint                 | Body                              | Reply                             |
-| ------------------------ | --------------------------------- | --------------------------------- |
-| `GET /api/info`          |                                   | `id`, `name`, `version`, `api`    |
-| `POST /api/pair`         | `name`                            | `pairing_id`; the TV shows a code |
-| `POST /api/pair/confirm` | `pairing_id`, `code`              | `token`, `id`                     |
-| `DELETE /api/pair`       |                                   | Unpairs this token                |
-| `GET /api/status`        |                                   | `overlay`, `overlay_ready`        |
-| `POST /api/overlay`      | As `luma.show_camera`, using URLs | `session`, `paused`               |
-| `DELETE /api/overlay`    |                                   | Closes the card, resumes playback |
-| `POST /api/notify`       | `message` (up to 300 characters)  | Shows a webOS toast               |
+| Endpoint                  | Body                                                           | Reply                                                                                                         |
+| ------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `GET /api/info`           |                                                                | `id`, `name`, `version`, `api`, `min_integration`                                                             |
+| `POST /api/pair`          | `name`                                                         | `pairing_id`; the TV shows a code                                                                             |
+| `POST /api/pair/confirm`  | `pairing_id`, `code`                                           | `token`, `id`                                                                                                 |
+| `DELETE /api/pair`        |                                                                | Unpairs this token                                                                                            |
+| `GET /api/status`         |                                                                | `version`, `api`, `min_integration`, `overlay`, `overlay_ready`, `cameras`, `streaming_keys`, `keyboard_hook` |
+| `POST /api/overlay`       | As `luma.show_camera`, using URLs                              | `session`, `paused`                                                                                           |
+| `DELETE /api/overlay`     |                                                                | Closes the card, resumes playback                                                                             |
+| `POST /api/notify`        | `message` (up to 300 characters)                               | Shows a webOS toast                                                                                           |
+| `POST /api/cameras`       | `cameras`: `id`, `name`, `stream_url`, `snapshot_url`          | Replaces the Cameras app's list                                                                               |
+| `PUT /api/streaming-keys` | `motn`, `tmdb`, `mdblist`; empty or missing keeps the TV's key | Which keys the TV holds                                                                                       |
+| `PUT /api/keyboard`       | `webhook`: a URL; missing removes it                           | `keyboard`: the field open now, or `null`                                                                     |
+| `POST /api/keyboard/text` | `text` (up to 120 characters), `submit` (default on)           | Types into the open field; `409` when none is open                                                            |
+| `GET /api/events`         | `?after=` the last event's `id`                                | Luma's log as server-sent events (below)                                                                      |
+| `GET /api/diagnostics`    |                                                                | Everything the TV kept of its log, and its state                                                              |
+
+`GET /api/events` stays open. It sends a `hello` event (`boot`, `version`, `uptime_s`, and
+`restarted` when Luma restarted since the `after` cursor), then what the TV kept after the cursor,
+then each new entry as it happens. A `log` event's data has `seq`, `time` (Unix milliseconds),
+`level`, `area` and `message`. A `metrics` event has the same fields plus `data` with `presented`,
+`dropped`, `work_p50_ms`, `work_p95_ms`, `work_max_ms`, `rss_mb`, `cpu_percent` and `uptime_s`.
+Each of these events has an `id` (`boot:seq`). Pass the last one as `after` to resume. A `missed`
+event says that entries after the cursor were already dropped. A comment line arrives every 15
+seconds. Each server has at most one stream: connecting again replaces the earlier one.
 
 ## Troubleshooting
 

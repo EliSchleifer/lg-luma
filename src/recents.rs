@@ -156,7 +156,7 @@ impl Default for Recents {
             dismissals: vec![],
             visibility: 0.,
             closing_focus: None,
-            updated: Instant::now(),
+            updated: crate::clock::now(),
         }
     }
 }
@@ -265,7 +265,7 @@ impl State {
             self.recents.dismissals.clear();
             self.recents.closing_focus = None;
         }
-        self.recents.updated = Instant::now();
+        self.recents.updated = crate::clock::now();
         self.recents.pending = None;
         // An interrupted mutation is reconciled by the new history read. Return
         // its presentation card while reversing the overlay fade.
@@ -346,7 +346,7 @@ impl State {
         self.dirty = true;
         match result {
             Err(error) => {
-                eprintln!("Luma recent apps: {error}");
+                crate::telemetry::log_warn!("recents", "{error}");
                 if let Command::Close(id) = &command {
                     for dismissal in &mut self.recents.dismissals {
                         if &dismissal.entry.app.id == id {
@@ -387,8 +387,12 @@ impl State {
                         .map(|e| Target::Recent(e.app.id.clone()))
                         .unwrap_or(Target::RecentEmpty);
                 }
-                Command::Launch(_) => {
-                    return self.back();
+                Command::Launch(id) => {
+                    let mut effects = self.back();
+                    if self.mark_used(&id) {
+                        effects.push(Effect::Save);
+                    }
+                    return effects;
                 }
                 Command::Close(id) => {
                     let removed = self

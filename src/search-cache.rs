@@ -1,0 +1,264 @@
+//! Disk cache for streaming search replies, so repeated searches cost no API calls and work
+//! instantly after a restart. One file per reply under `streaming-cache/` next to the
+//! preferences, named by a SHA-256 of its key. Each read states how old a reply may be, so one
+//! cache serves short-lived data (where a show streams) and long-lived data (a film's studio).
+//! The directory is capped; the oldest replies go first. Any unreadable entry is a miss.
+//! Fitting the cap means listing the whole directory, so it is done once per `limit / 16`
+//! bytes written rather than for every reply: a search stores twenty at once.
+//! Posters use their own capped directory of raw image files (`get_bytes`/`put_bytes`).
+use ring::digest;
+use serde::{Serialize, de::DeserializeOwned};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+/// How long each kind of reply stays fresh.
+pub mod ttl {
+    use std::time::Duration;
+    const HOUR: Duration = Duration::from_secs(3600);
+    /// Movie of the Night: where shows stream changes daily, and every call costs quota.
+    pub const STREAMING: Duration = HOUR.saturating_mul(12);
+    /// TMDB search results: popularity moves, slowly.
+    pub const TMDB_SEARCH: Duration = HOUR.saturating_mul(24);
+    /// TMDB details and collections: studios and budgets never change; votes drift slowly.
+    pub const TMDB_DETAILS: Duration = HOUR.saturating_mul(24 * 30);
+}
+
+/// Plenty for hundreds of searches; a title search reply is a few hundred KB.
+pub const DEFAULT_LIMIT: u64 = 64 * 1024 * 1024;
+/// Posters are about 30 KB each, so this keeps well over a thousand.
+pub const POSTER_LIMIT: u64 = 48 * 1024 * 1024;
+const IMAGE: &str = "img";
+
+#[derive(Clone, Debug)]
+pub struct DiskCache {
+    dir: PathBuf,
+    limit: u64,
+    /// Bytes written since the directory was last fitted to its limit, shared by clones.
+    unchecked: Arc<AtomicU64>,
+}
+
+#[derive(serde::Deserialize)]
+struct Entry<T> {
+    key: String,
+    stored: u64,
+    value: T,
+}
+
+#[derive(Serialize)]
+struct EntryRef<'a, T> {
+    key: &'a str,
+    stored: u64,
+    value: &'a T,
+}
+
+fn unix(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+impl DiskCache {
+    pub fn new(dir: PathBuf, limit: u64) -> Self {
+        Self {
+            dir,
+            limit,
+            // The first write of a run fits the directory: an earlier run may have left it full.
+            unchecked: Arc::new(AtomicU64::new(u64::MAX)),
+        }
+    }
+
+    /// The cache directory beside the preferences.
+    pub fn beside(preferences: &Path) -> Self {
+        Self::new(preferences.with_file_name("streaming-cache"), DEFAULT_LIMIT)
+    }
+
+    /// The poster directory beside the preferences.
+    pub fn posters_beside(preferences: &Path) -> Self {
+        Self::new(
+            preferences.with_file_name("streaming-posters"),
+            POSTER_LIMIT,
+        )
+    }
+
+    fn file(&self, key: &str) -> PathBuf {
+        self.named(key, "json")
+    }
+
+    fn named(&self, key: &str, extension: &str) -> PathBuf {
+        let hash = digest::digest(&digest::SHA256, key.as_bytes());
+        let name: String = hash
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        self.dir.join(format!("{name}.{extension}"))
+    }
+
+    /// The value stored under `key`, if it is younger than `max_age`.
+    pub fn get<T: DeserializeOwned>(
+        &self,
+        key: &str,
+        max_age: Duration,
+        now: SystemTime,
+    ) -> Option<T> {
+        let bytes = fs::read(self.file(key)).ok()?;
+        let entry: Entry<T> = serde_json::from_slice(&bytes).ok()?;
+        let age = unix(now).saturating_sub(entry.stored);
+        (entry.key == key && age <= max_age.as_secs()).then_some(entry.value)
+    }
+
+    /// Stores a value; failures only cost a future API call, so they are logged and ignored.
+    pub fn put<T: Serialize>(&self, key: &str, value: &T, now: SystemTime) {
+        let result = (|| {
+            fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+            let bytes = serde_json::to_vec(&EntryRef {
+                key,
+                stored: unix(now),
+                value,
+            })
+            .map_err(|e| e.to_string())?;
+            crate::storage::write_atomic(&self.file(key), &bytes).map(|()| bytes.len())
+        })();
+        match result {
+            Ok(written) => self.wrote(written),
+            Err(error) => crate::telemetry::log_warn!("streaming", "cache: {error}"),
+        }
+    }
+
+    /// A stored image, however old: a poster at a given link does not change.
+    pub fn get_bytes(&self, key: &str) -> Option<Vec<u8>> {
+        fs::read(self.named(key, IMAGE)).ok()
+    }
+
+    /// Stores an image; like `put`, failures are logged and ignored.
+    pub fn put_bytes(&self, key: &str, bytes: &[u8]) {
+        match crate::storage::write_atomic(&self.named(key, IMAGE), bytes) {
+            Ok(()) => self.wrote(bytes.len()),
+            Err(error) => crate::telemetry::log_warn!("streaming", "cache: {error}"),
+        }
+    }
+
+    /// Counts a write, and fits the directory to its limit once enough has been written to
+    /// overshoot it by a sixteenth.
+    fn wrote(&self, bytes: usize) {
+        let unchecked = self
+            .unchecked
+            .fetch_add(bytes as u64, Ordering::Relaxed)
+            .saturating_add(bytes as u64);
+        if unchecked >= self.limit / 16 {
+            self.unchecked.store(0, Ordering::Relaxed);
+            self.evict();
+        }
+    }
+
+    /// Removes the oldest entries until the directory fits its limit.
+    fn evict(&self) {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return;
+        };
+        let mut files: Vec<(SystemTime, u64, PathBuf)> = entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "json" || ext == IMAGE)
+            })
+            .filter_map(|entry| {
+                let metadata = entry.metadata().ok()?;
+                Some((metadata.modified().ok()?, metadata.len(), entry.path()))
+            })
+            .collect();
+        let mut total: u64 = files.iter().map(|(_, size, _)| size).sum();
+        if total <= self.limit {
+            return;
+        }
+        files.sort();
+        for (_, size, path) in files {
+            if total <= self.limit {
+                break;
+            }
+            if fs::remove_file(&path).is_ok() {
+                total -= size;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cache(name: &str, limit: u64) -> DiskCache {
+        let dir = std::env::temp_dir().join(format!("luma-cache-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        DiskCache::new(dir, limit)
+    }
+
+    #[test]
+    fn values_come_back_until_they_are_too_old() {
+        let cache = cache("ttl", DEFAULT_LIMIT);
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        cache.put("tmdb:movie:620", &vec!["Ghostbusters".to_owned()], now);
+        let hour = Duration::from_secs(3600);
+        assert_eq!(
+            cache.get::<Vec<String>>("tmdb:movie:620", hour, now + hour),
+            Some(vec!["Ghostbusters".to_owned()])
+        );
+        assert_eq!(
+            cache.get::<Vec<String>>("tmdb:movie:620", hour, now + hour * 2),
+            None
+        );
+        assert_eq!(cache.get::<Vec<String>>("tmdb:movie:2978", hour, now), None);
+        // A value of another shape is a miss, not an error.
+        assert_eq!(cache.get::<u32>("tmdb:movie:620", hour, now), None);
+        fs::remove_dir_all(&cache.dir).unwrap();
+    }
+
+    #[test]
+    fn the_oldest_entries_are_evicted_to_fit_the_limit() {
+        let cache = cache("evict", 1500);
+        let now = SystemTime::now();
+        let big = "x".repeat(600);
+        for key in ["a", "b", "c"] {
+            cache.put(key, &big, now);
+            // Modification times order eviction; make them distinct.
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let day = Duration::from_secs(86_400);
+        assert_eq!(cache.get::<String>("a", day, now), None);
+        assert_eq!(cache.get::<String>("c", day, now), Some(big));
+        fs::remove_dir_all(&cache.dir).unwrap();
+    }
+
+    #[test]
+    fn images_round_trip_and_count_toward_the_limit() {
+        let cache = cache("images", 1500);
+        cache.put_bytes("poster:a", &[1; 600]);
+        std::thread::sleep(Duration::from_millis(20));
+        cache.put_bytes("poster:b", &[2; 600]);
+        std::thread::sleep(Duration::from_millis(20));
+        cache.put("reply", &"x".repeat(600), SystemTime::now());
+        assert_eq!(cache.get_bytes("poster:a"), None);
+        assert_eq!(cache.get_bytes("poster:b"), Some(vec![2; 600]));
+        assert_eq!(cache.get_bytes("poster:c"), None);
+        fs::remove_dir_all(&cache.dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_entries_are_misses() {
+        let cache = cache("corrupt", DEFAULT_LIMIT);
+        fs::create_dir_all(&cache.dir).unwrap();
+        fs::write(cache.file("k"), b"{not json").unwrap();
+        assert_eq!(
+            cache.get::<String>("k", Duration::from_secs(60), SystemTime::now()),
+            None
+        );
+        fs::remove_dir_all(&cache.dir).unwrap();
+    }
+}

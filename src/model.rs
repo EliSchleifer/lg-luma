@@ -157,6 +157,9 @@ impl Console {
 pub struct Inventory {
     pub apps: Vec<App>,
     pub inputs: Vec<Input>,
+    /// LG's own search app, when the TV has one: the header's search button hands off to it.
+    /// It is a hidden system app, so it is never one of `apps`.
+    pub search: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -165,6 +168,87 @@ pub enum InputMode {
     Auto,
     On,
     Off,
+    /// Kept off the Home strip, but listed on the Apps page while connected with a signal,
+    /// for sources such as a soundbar that rarely need their own card.
+    Apps,
+}
+
+/// How `Preferences::input_modes` is stored. Builds before Apps only parse `input_modes` as
+/// Auto, On or Off and reject the whole preferences file on any other value, which would stop
+/// them from starting. Apps-only inputs are therefore saved as Off there, which older builds
+/// keep off the Home strip, and listed separately in `apps_only_inputs`, a field older builds
+/// ignore. Reading accepts both forms and skips values it does not know.
+mod input_modes_file {
+    use super::InputMode;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    #[derive(Serialize)]
+    struct Saved<'a> {
+        input_modes: BTreeMap<&'a str, InputMode>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        apps_only_inputs: Vec<&'a str>,
+    }
+
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct Loaded {
+        input_modes: BTreeMap<String, serde_json::Value>,
+        apps_only_inputs: Vec<serde_json::Value>,
+    }
+
+    pub fn serialize<S: Serializer>(
+        modes: &BTreeMap<String, InputMode>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        Saved {
+            input_modes: modes
+                .iter()
+                .map(|(id, mode)| {
+                    let mode = if *mode == InputMode::Apps {
+                        InputMode::Off
+                    } else {
+                        *mode
+                    };
+                    (id.as_str(), mode)
+                })
+                .collect(),
+            apps_only_inputs: modes
+                .iter()
+                .filter(|(_, mode)| **mode == InputMode::Apps)
+                .map(|(id, _)| id.as_str())
+                .collect(),
+        }
+        .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<String, InputMode>, D::Error> {
+        let loaded = Loaded::deserialize(deserializer).unwrap_or_default();
+        let mut modes: BTreeMap<String, InputMode> = loaded
+            .input_modes
+            .into_iter()
+            .filter_map(|(id, mode)| {
+                let mode = match mode.as_str()? {
+                    "Auto" => InputMode::Auto,
+                    "On" => InputMode::On,
+                    "Off" => InputMode::Off,
+                    "Apps" => InputMode::Apps,
+                    _ => return None,
+                };
+                Some((id, mode))
+            })
+            .collect();
+        for id in loaded.apps_only_inputs {
+            let Some(id) = id.as_str() else { continue };
+            // Saved alongside these inputs as Off; any other mode was set since and wins.
+            if matches!(modes.get(id), None | Some(InputMode::Off)) {
+                modes.insert(id.to_owned(), InputMode::Apps);
+            }
+        }
+        Ok(modes)
+    }
 }
 
 /// POST is the default because Home Assistant webhooks accept only POST and PUT
@@ -230,6 +314,20 @@ pub const TILE_ICONS: [(&str, &str); 15] = [
 ];
 
 pub const CUSTOM_TILE_PREFIX: &str = "custom.";
+/// Luma's built-in Cameras app: Home Assistant's cameras in the overlay app's gallery. It is
+/// listed while Home Assistant is on and never sent to the TV as a launch request.
+pub const CAMERAS_APP: &str = "luma.cameras";
+/// Luma's built-in tile for LG's original Home. While Luma has replaced Home, opening it lifts
+/// that takeover until the next cold boot (see `platform::open_lg_home`).
+pub const LG_HOME_APP: &str = "luma.lg-home";
+
+/// Apps Luma adds itself (shortcut tiles, Cameras, Criterion and LG Home); the TV never reports them.
+pub fn is_builtin(id: &str) -> bool {
+    id.starts_with(CUSTOM_TILE_PREFIX)
+        || id == CAMERAS_APP
+        || id == LG_HOME_APP
+        || id == crate::criterion::APP
+}
 pub const TILE_LIMIT: usize = 64;
 pub const TILE_URL_LIMIT: usize = 512;
 
@@ -295,6 +393,9 @@ pub struct Preferences {
     pub show_greeting: bool,
     pub show_date: bool,
     pub date_format: DateFormat,
+    /// Saved through `input_modes_file`: Apps only is stored apart from the modes older
+    /// builds know, so those builds can still read the file.
+    #[serde(flatten, with = "input_modes_file")]
     pub input_modes: BTreeMap<String, InputMode>,
     /// Custom names by input app ID; the TV's port and label stay visible as detail.
     pub input_names: BTreeMap<String, String>,
@@ -317,8 +418,36 @@ pub struct Preferences {
     pub wallpaper_gradient: bool,
     /// Accept camera overlays and notifications from paired Home Assistant servers.
     pub home_assistant: bool,
+    /// After the LG Home tile lifted Luma's Home takeover, opening Luma takes Home back.
+    pub luma_home: bool,
+    /// Settings → System: also offer nightly builds of main, not only releases.
+    pub nightly_updates: bool,
     /// Unix seconds of the last automatic or chosen wallpaper change, for the timed modes.
     pub wallpaper_changed: u64,
+    /// Settings this build does not know, from a newer Luma. They are written back unchanged so
+    /// that going back a version and forward again loses nothing; [`RETIRED_SETTINGS`] are
+    /// dropped instead. Keep this field last: the flattened `input_modes` above takes its own
+    /// keys first.
+    #[serde(flatten, deserialize_with = "deserialize_extra")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Settings older builds saved and Luma no longer uses. They are dropped when preferences are
+/// read rather than kept as settings from a newer Luma. Add a key here when removing a field.
+const RETIRED_SETTINGS: &[&str] = &["show_names", "wallpaper_skip"];
+
+fn deserialize_extra<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<serde_json::Map<String, serde_json::Value>, D::Error> {
+    let mut extra = serde_json::Map::deserialize(deserializer)?;
+    extra.retain(|key, _| !RETIRED_SETTINGS.contains(&key.as_str()));
+    Ok(extra)
+}
+
+/// Cable reported present and the TV not reporting "no signal". Firmware without signal
+/// information falls back to the cable state.
+fn input_live(input: &Input) -> bool {
+    input.connected == Some(true) && input.signal != Some(false)
 }
 
 impl Default for Preferences {
@@ -350,7 +479,10 @@ impl Default for Preferences {
             wallpaper_cycle: false,
             wallpaper_gradient: true,
             home_assistant: false,
+            luma_home: true,
+            nightly_updates: false,
             wallpaper_changed: 0,
+            extra: serde_json::Map::new(),
         }
     }
 }
@@ -381,7 +513,12 @@ impl Preferences {
                 if ids.len() >= 6 {
                     break;
                 }
-                if !ids.contains(&app.id) {
+                // LG Home is an escape hatch in Apps, not a default favorite; Criterion is a
+                // subscription the household may not have.
+                if !ids.contains(&app.id)
+                    && app.id != LG_HOME_APP
+                    && app.id != crate::criterion::APP
+                {
                     ids.push(app.id.clone());
                 }
             }
@@ -419,11 +556,21 @@ impl Preferences {
     /// "no signal" report, so a console that is unplugged or switched off takes no slot.
     /// Firmware without signal information falls back to the cable state.
     pub fn input_visible(&self, input: &Input) -> bool {
-        match self.input_modes.get(&input.id).copied().unwrap_or_default() {
+        match self.input_mode(input) {
             InputMode::On => true,
-            InputMode::Off => false,
-            InputMode::Auto => input.connected == Some(true) && input.signal != Some(false),
+            InputMode::Off | InputMode::Apps => false,
+            InputMode::Auto => input_live(input),
         }
+    }
+
+    /// Whether the input is listed on the Apps page: only "Apps only" inputs, and only while
+    /// they are connected with a signal, using the same test as Auto.
+    pub fn input_in_apps(&self, input: &Input) -> bool {
+        self.input_mode(input) == InputMode::Apps && input_live(input)
+    }
+
+    pub fn input_mode(&self, input: &Input) -> InputMode {
+        self.input_modes.get(&input.id).copied().unwrap_or_default()
     }
 
     /// The console an input reports now, otherwise the one it reported last.
@@ -692,6 +839,8 @@ pub fn demo_inventory() -> Inventory {
                 device: None,
             },
         ],
+        // Desktop preview of the header's search button; launches are no-ops there.
+        search: Some("com.webos.app.voice".into()),
     };
     // Desktop-only artwork gallery. TV inventory is always read from services.
     for brand in crate::branding::BRANDS {
